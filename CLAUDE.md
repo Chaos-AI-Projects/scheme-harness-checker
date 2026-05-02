@@ -32,11 +32,4 @@ Detects programs that may not terminate (infinite loops / unbounded recursion).
 
 - **Target language**: Scheme (ChezScheme dialect)
 - **Target input**: LLM-generated programs — expected to be relatively simple and well-structured
-- **Out of scope**: Macros (`syntax-case`, `define-syntax`, etc.) are not analyzed
-
-## Project Structure
-
-```
-harness-checker/
-├── CLAUDE.md          # This file — project overview and design
-```
+- **Out of scope**: Macros (`syntax-case`, `define-syntax`, etc.) are forbidden

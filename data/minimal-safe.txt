@@ -1,0 +1,163 @@
+; minimal-safe.txt
+; Default whitelist: minimal set of safe Scheme procedures for LLM-generated code.
+; Deny-by-default: only identifiers listed here are allowed as external dependencies.
+
+; Arithmetic
++
+-
+*
+/
+=
+<
+>
+<=
+>=
+zero?
+positive?
+negative?
+odd?
+even?
+abs
+max
+min
+modulo
+remainder
+quotient
+expt
+sqrt
+floor
+ceiling
+round
+truncate
+number?
+integer?
+real?
+exact?
+inexact?
+exact->inexact
+inexact->exact
+number->string
+string->number
+
+; Boolean
+not
+boolean?
+and
+or
+
+; Pairs and Lists
+cons
+car
+cdr
+caar
+cadr
+cdar
+cddr
+caaar
+caadr
+cadar
+caddr
+cdaar
+cdadr
+cddar
+cdddr
+pair?
+null?
+list?
+list
+length
+append
+reverse
+map
+for-each
+filter
+fold-left
+fold-right
+assoc
+assv
+assq
+member
+memv
+memq
+
+; Symbols
+symbol?
+symbol->string
+string->symbol
+
+; Characters
+char?
+char=?
+char<?
+char>?
+char<=?
+char>=?
+char-alphabetic?
+char-numeric?
+char-whitespace?
+char-upcase
+char-downcase
+char->integer
+integer->char
+
+; Strings
+string?
+string-length
+string-ref
+string=?
+string<?
+string>?
+string<=?
+string>=?
+substring
+string-append
+string->list
+list->string
+string-copy
+string-contains
+string-upcase
+string-downcase
+
+; Vectors
+vector?
+make-vector
+vector
+vector-length
+vector-ref
+vector-set!
+vector->list
+list->vector
+vector-fill!
+
+; Basic I/O (safe subset - output only)
+display
+newline
+write
+format
+
+; Control
+apply
+values
+call-with-values
+dynamic-wind
+
+; Equivalence
+eq?
+eqv?
+equal?
+
+; Type predicates
+procedure?
+char?
+string?
+port?
+eof-object?
+
+; Multiple values
+let-values
+
+; Tail-position forms (these are syntax, but may appear as unbound if not tracked)
+when
+unless
+case
+do

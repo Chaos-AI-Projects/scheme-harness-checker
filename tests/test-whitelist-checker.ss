@@ -120,6 +120,66 @@
 (let ((violations (check-source "'(dangerous-fn evil system)" '())))
   (assert-violations-empty "quoted symbols are not checked" violations))
 
+;; --- Test: do ---
+(display "Test group: do") (newline)
+
+(let ((violations (check-source
+                   "(do ((i 0 (+ i 1))) ((= i 10) i) (display i))"
+                   '(+ = display))))
+  (assert-violations-empty "do binds iteration vars" violations))
+
+(let ((violations (check-source
+                   "(do ((i 0 (+ i 1)) (j 10 (- j 1))) ((= i j) (+ i j)) (display i) (display j))"
+                   '(+ - = display))))
+  (assert-violations-empty "do multiple bindings" violations))
+
+(let ((violations (check-source
+                   "(do ((i 0 (+ i 1))) ((= i n)) (display i))"
+                   '(+ = display))))
+  (assert-violations "do body references unbound n" '(n) violations))
+
+;; --- Test: let-values ---
+(display "Test group: let-values") (newline)
+
+(let ((violations (check-source
+                   "(let-values (((a b) (values 1 2))) (+ a b))"
+                   '(+ values))))
+  (assert-violations-empty "let-values binds variables" violations))
+
+(let ((violations (check-source
+                   "(let-values (((x y z) (get-coords))) (+ x y z))"
+                   '(+ get-coords))))
+  (assert-violations-empty "let-values with 3 bindings" violations))
+
+(let ((violations (check-source
+                   "(let-values (((a b) (values 1 2))) (+ a b c))"
+                   '(+ values))))
+  (assert-violations "let-values does not bind c" '(c) violations))
+
+;; --- Test: case ---
+(display "Test group: case") (newline)
+
+(let ((violations (check-source
+                   "(case x ((foo bar) 1) ((baz) 2) (else 3))"
+                   '())))
+  (assert-violations "case key expr unbound but datums not flagged" '(x) violations))
+
+(let ((violations (check-source
+                   "(define x 5) (case x ((1 2 3) (display \"low\")) ((4 5 6) (display \"mid\")) (else (display \"high\")))"
+                   '(display))))
+  (assert-violations-empty "case with bound key and whitelisted body" violations))
+
+(let ((violations (check-source
+                   "(case (get-val) ((alpha beta gamma) (process alpha)) (else (fallback)))"
+                   '(get-val process fallback))))
+  (assert-violations "case datum symbols not walked as expressions" '(alpha) violations))
+
+;; Verify datums that are symbols don't get flagged
+(let ((violations (check-source
+                   "(define v 1) (case v ((red green blue) \"color\") ((circle square) \"shape\"))"
+                   '())))
+  (assert-violations-empty "case datum symbols ignored entirely" violations))
+
 ;; --- Test: realistic LLM-generated code ---
 (display "Test group: realistic LLM code") (newline)
 

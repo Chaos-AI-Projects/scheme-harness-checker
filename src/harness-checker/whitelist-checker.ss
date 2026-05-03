@@ -111,6 +111,15 @@
                     (set! unbound (cons (cadr expr) unbound))))
                 (when (and (pair? (cdr expr)) (pair? (cddr expr)))
                   (walk (caddr expr) env)))
+               ;; (do ((var init step) ...) (test expr ...) body ...)
+               ((eq? head 'do)
+                (walk-do (cdr expr) env))
+               ;; (let-values (((var ...) expr) ...) body ...)
+               ((eq? head 'let-values)
+                (walk-let-values (cdr expr) env))
+               ;; (case expr ((datum ...) body ...) ...)
+               ((eq? head 'case)
+                (walk-case (cdr expr) env))
                ;; (cond ...) - walk each clause
                ((eq? head 'cond)
                 (for-each
@@ -200,6 +209,67 @@
                  (new-env (append vars env)))
             (for-each (lambda (v) (walk v new-env)) vals)
             (walk-body body new-env))))
+
+      ;; (do ((var init step) ...) (test expr ...) body ...)
+      (define (walk-do rest env)
+        (when (and (pair? rest) (pair? (cdr rest)))
+          (let* ((bindings (car rest))
+                 (termination (cadr rest))
+                 (body (cddr rest))
+                 ;; Extract var names from bindings
+                 (vars (map car bindings))
+                 (new-env (append vars env)))
+            ;; Walk init exprs in outer env
+            (for-each (lambda (binding)
+                        (when (and (pair? binding) (pair? (cdr binding)))
+                          (walk (cadr binding) env)))
+                      bindings)
+            ;; Walk step exprs in new env (vars are visible)
+            (for-each (lambda (binding)
+                        (when (and (pair? binding) (pair? (cdr binding)) (pair? (cddr binding)))
+                          (walk (caddr binding) new-env)))
+                      bindings)
+            ;; Walk termination clause in new env
+            (when (pair? termination)
+              (for-each (lambda (e) (walk e new-env)) termination))
+            ;; Walk body in new env
+            (for-each (lambda (e) (walk e new-env)) body))))
+
+      ;; (let-values (((var ...) expr) ...) body ...)
+      (define (walk-let-values rest env)
+        (when (and (pair? rest) (or (pair? (car rest)) (null? (car rest))))
+          (let* ((bindings (car rest))
+                 (body (cdr rest))
+                 ;; Extract all var names from formals lists
+                 (vars (apply append
+                             (map (lambda (binding)
+                                    (if (pair? binding)
+                                        (extract-params (car binding))
+                                        '()))
+                                  bindings)))
+                 (new-env (append vars env)))
+            ;; Walk value exprs in outer env
+            (for-each (lambda (binding)
+                        (when (and (pair? binding) (pair? (cdr binding)))
+                          (walk (cadr binding) env)))
+                      bindings)
+            ;; Walk body in new env
+            (walk-body body new-env))))
+
+      ;; (case expr ((datum ...) body ...) ...)
+      (define (walk-case rest env)
+        (when (pair? rest)
+          ;; Walk the key expression
+          (walk (car rest) env)
+          ;; Walk each clause, skipping datums
+          (for-each (lambda (clause)
+                      (when (pair? clause)
+                        ;; First element is datum list (or 'else') - skip it
+                        ;; Walk remaining elements as body expressions
+                        (if (eq? (car clause) 'else)
+                            (for-each (lambda (e) (walk e env)) (cdr clause))
+                            (for-each (lambda (e) (walk e env)) (cdr clause)))))
+                    (cdr rest))))
 
       ;; Walk a body (sequence of expressions) collecting top-level defines
       (define (walk-body exprs env)

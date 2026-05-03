@@ -213,6 +213,95 @@
                    '())))
   (assert-violations "dangerous system call detected" '(system) violations))
 
+;; --- Test: let* ---
+(display "Test group: let*") (newline)
+
+(let ((violations (check-source "(let* ((x 1) (y (+ x 1))) (+ x y))" '(+))))
+  (assert-violations-empty "let* sequential binding" violations))
+
+(let ((violations (check-source "(let* ((x 1) (y (+ x 1)) (z (+ x y))) z)" '(+))))
+  (assert-violations-empty "let* three sequential bindings" violations))
+
+(let ((violations (check-source "(let* ((x 1)) (+ x y))" '(+))))
+  (assert-violations "let* does not bind y" '(y) violations))
+
+;; --- Test: letrec* ---
+(display "Test group: letrec*") (newline)
+
+(let ((violations (check-source
+                   "(letrec* ((even? (lambda (n) (if (= n 0) #t (odd? (- n 1))))) (odd? (lambda (n) (if (= n 0) #f (even? (- n 1)))))) (even? 10))"
+                   '(= -))))
+  (assert-violations-empty "letrec* mutual recursion" violations))
+
+;; --- Test: when/unless ---
+(display "Test group: when/unless") (newline)
+
+(let ((violations (check-source "(define x 5) (when (> x 0) (display x))" '(> display))))
+  (assert-violations-empty "when with bound variable" violations))
+
+(let ((violations (check-source "(define x 5) (unless (> x 0) (display x))" '(> display))))
+  (assert-violations-empty "unless with bound variable" violations))
+
+(let ((violations (check-source "(when flag (action))" '(action))))
+  (assert-violations "when with unbound test" '(flag) violations))
+
+;; --- Test: case-lambda ---
+(display "Test group: case-lambda") (newline)
+
+(let ((violations (check-source
+                   "(define f (case-lambda ((x) (+ x 1)) ((x y) (+ x y))))"
+                   '(+))))
+  (assert-violations-empty "case-lambda binds params per clause" violations))
+
+(let ((violations (check-source
+                   "(define f (case-lambda (() 0) ((x) x) ((x y) (+ x y)) ((x y . rest) (apply + x y rest))))"
+                   '(+ apply))))
+  (assert-violations-empty "case-lambda multiple arities with rest" violations))
+
+(let ((violations (check-source
+                   "(define f (case-lambda ((x) (+ x z))))"
+                   '(+))))
+  (assert-violations "case-lambda unbound in body" '(z) violations))
+
+;; --- Test: parameterize ---
+(display "Test group: parameterize") (newline)
+
+(let ((violations (check-source
+                   "(define my-param (make-parameter 10)) (parameterize ((my-param 20)) (my-param))"
+                   '(make-parameter))))
+  (assert-violations-empty "parameterize with bound parameter" violations))
+
+(let ((violations (check-source
+                   "(parameterize ((current-output-port (open-string-output-port))) (display \"hi\"))"
+                   '(current-output-port open-string-output-port display))))
+  (assert-violations-empty "parameterize with whitelisted functions" violations))
+
+;; --- Test: guard ---
+(display "Test group: guard") (newline)
+
+(let ((violations (check-source
+                   "(guard (exn ((string? exn) (display exn))) (error \"oops\"))"
+                   '(string? display error))))
+  (assert-violations-empty "guard binds exception variable" violations))
+
+(let ((violations (check-source
+                   "(guard (exn ((message-condition? exn) (condition-message exn)) (else (display \"unknown\"))) (risky-operation))"
+                   '(message-condition? condition-message display risky-operation))))
+  (assert-violations-empty "guard with else clause" violations))
+
+(let ((violations (check-source
+                   "(guard (e ((pair? e) (car e))) (error \"fail\"))"
+                   '(pair? car error))))
+  (assert-violations-empty "guard simple" violations))
+
+;; --- Test: internal define mutual visibility ---
+(display "Test group: internal define mutual visibility") (newline)
+
+(let ((violations (check-source
+                   "(define (outer x) (define (f n) (if (= n 0) 1 (g (- n 1)))) (define (g n) (if (= n 0) 1 (f (- n 1)))) (f x))"
+                   '(= -))))
+  (assert-violations-empty "internal defines are mutually visible" violations))
+
 ;; --- Summary ---
 (newline)
 (display "Results: ")

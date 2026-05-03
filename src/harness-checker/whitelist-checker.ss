@@ -18,12 +18,12 @@
           read-all-expressions
           collect-unbound
           load-whitelist
-          violation-identifier
-          violation-context)
+          wl-violation-identifier
+          wl-violation-context)
   (import (rnrs))
 
   ;; A violation record: an unbound identifier not in the whitelist
-  (define-record-type violation
+  (define-record-type wl-violation
     (fields identifier context))
 
   ;; Read all s-expressions from a string
@@ -80,7 +80,7 @@
           ((symbol? expr)
            (unless (memq expr env)
              (set! unbound (cons expr unbound))))
-          ((not (pair? expr)) (void))
+          ((not (pair? expr)) (values))
           (else
            (let ((head (car expr)))
              (cond
@@ -97,7 +97,7 @@
                ((eq? head 'letrec)
                 (walk-letrec (cdr expr) env))
                ;; (quote ...) - skip entirely, no identifiers to resolve
-               ((eq? head 'quote) (void))
+               ((eq? head 'quote) (values))
                ;; (if test then else)
                ((eq? head 'if)
                 (for-each (lambda (e) (walk e env)) (cdr expr)))
@@ -121,9 +121,13 @@
                ;; (and ...) (or ...)
                ((or (eq? head 'and) (eq? head 'or))
                 (for-each (lambda (e) (walk e env)) (cdr expr)))
-               ;; Forbidden forms - still walk but note them
+               ;; Forbidden forms - flag them and scan subforms for more forbidden heads
                ((memq head '(define-syntax syntax-case syntax-rules))
-                (set! unbound (cons head unbound)))
+                (set! unbound (cons head unbound))
+                (for-each (lambda (e)
+                            (when (and (pair? e) (memq (car e) '(define-syntax syntax-case syntax-rules)))
+                              (walk e env)))
+                          (cdr expr)))
                ;; General application or other form
                (else
                 (for-each (lambda (e) (walk e env)) expr)))))))
@@ -145,7 +149,7 @@
            (let ((name (car rest))
                  (val (cadr rest)))
              (walk val (cons name env))))
-          (else (void))))
+          (else (values))))
 
       ;; (lambda (params ...) body ...)
       (define (walk-lambda rest env)
@@ -169,7 +173,7 @@
                   (new-env (cons name (append vars env))))
              ;; vals are evaluated in outer env (but name is available for recursion)
              (for-each (lambda (v) (walk v env)) vals)
-             (for-each (lambda (e) (walk e new-env)) body)))
+             (walk-body body new-env)))
           ;; regular let: (let ((var val) ...) body ...)
           ((and (pair? rest) (pair? (car rest)))
            (let* ((bindings (car rest))
@@ -179,11 +183,11 @@
                   (new-env (append vars env)))
              ;; vals are evaluated in outer env
              (for-each (lambda (v) (walk v env)) vals)
-             (for-each (lambda (e) (walk e new-env)) body)))
+             (walk-body body new-env)))
           ;; empty let: (let () body ...)
           ((and (pair? rest) (null? (car rest)))
-           (for-each (lambda (e) (walk e env)) (cdr rest)))
-          (else (void))))
+           (walk-body (cdr rest) env))
+          (else (values))))
 
       ;; (letrec ((var val) ...) body ...)
       (define (walk-letrec rest env)
@@ -195,7 +199,7 @@
                  ;; In letrec, all vars are in scope for all vals and body
                  (new-env (append vars env)))
             (for-each (lambda (v) (walk v new-env)) vals)
-            (for-each (lambda (e) (walk e new-env)) body))))
+            (walk-body body new-env))))
 
       ;; Walk a body (sequence of expressions) collecting top-level defines
       (define (walk-body exprs env)
@@ -251,7 +255,7 @@
               (map (lambda (id)
                      (if (memq id whitelist)
                          #f
-                         (make-violation id 'unbound)))
+                         (make-wl-violation id 'unbound)))
                    unbound))))
 
   ;; Check source code string against a whitelist.

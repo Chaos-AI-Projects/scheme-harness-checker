@@ -20,10 +20,10 @@
         (display "    actual:   ") (write actual) (newline))))
 
 (define (assert-violations-empty test-name violations)
-  (assert-equal test-name '() (map violation-identifier violations)))
+  (assert-equal test-name '() (map wl-violation-identifier violations)))
 
 (define (assert-violations test-name expected-ids violations)
-  (let ((actual-ids (map violation-identifier violations)))
+  (let ((actual-ids (map wl-violation-identifier violations)))
     (assert-equal test-name
                   (list-sort symbol<? expected-ids)
                   (list-sort symbol<? actual-ids))))

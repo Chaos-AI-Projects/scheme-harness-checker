@@ -24,9 +24,9 @@
           (for-each
            (lambda (v)
              (display "  - ")
-             (display (violation-identifier v))
+             (display (wl-violation-identifier v))
              (display " (")
-             (display (violation-context v))
+             (display (wl-violation-context v))
              (display ")")
              (newline))
            violations)

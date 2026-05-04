@@ -3,10 +3,15 @@
 ;;
 ;; Approach:
 ;;   1. Use `read` to parse source into s-expressions
-;;   2. Walk the tree with an abstract evaluator tracking bindings
-;;      from: define, let, lambda, letrec
+;;   2. Walk the s-expression tree using packrat PEG patterns for
+;;      form recognition, with a fused single-pass design that carries
+;;      the lexical environment as an inherited attribute (Option B)
 ;;   3. Collect unbound identifiers (external dependencies)
 ;;   4. Compare against a deny-by-default whitelist
+;;
+;; The PEG walker (peg-walker.ss) replaces the hand-coded cond-dispatch
+;; walker with packrat pattern matching for form classification.
+;; See issue #248 for design rationale.
 ;;
 ;; The result is a list of violations: identifiers the program uses
 ;; that are not locally defined and not in the whitelist.
@@ -20,7 +25,8 @@
           load-whitelist
           wl-violation-identifier
           wl-violation-context)
-  (import (rnrs))
+  (import (rnrs)
+          (harness-checker peg-walker))
 
   ;; A violation record: an unbound identifier not in the whitelist
   (define-record-type wl-violation
@@ -71,329 +77,12 @@
       (substring s start end)))
 
   ;; Collect all unbound identifiers from a list of expressions.
-  ;; `env` is a list of symbols that are currently bound.
-  ;; Returns a list of symbols (may contain duplicates).
+  ;; Delegates to the PEG-based walker (peg-walker.ss) which uses
+  ;; packrat PEG patterns for form recognition with a fused single-pass
+  ;; design threading the environment as an inherited attribute.
+  ;; Returns a deduplicated list of unbound symbols.
   (define (collect-unbound exprs)
-    (let ((unbound '()))
-      (define (walk expr env)
-        (cond
-          ((symbol? expr)
-           (unless (memq expr env)
-             (set! unbound (cons expr unbound))))
-          ((not (pair? expr)) (values))
-          (else
-           (let ((head (car expr)))
-             (cond
-               ;; (define name expr) or (define (name . params) body ...)
-               ((eq? head 'define)
-                (walk-define (cdr expr) env))
-               ;; (lambda (params ...) body ...)
-               ((eq? head 'lambda)
-                (walk-lambda (cdr expr) env))
-               ;; (let ((var val) ...) body ...) or named let
-               ((eq? head 'let)
-                (walk-let (cdr expr) env))
-               ;; (letrec ((var val) ...) body ...)
-               ((eq? head 'letrec)
-                (walk-letrec (cdr expr) env))
-               ;; (let* ((var val) ...) body ...)
-               ((eq? head 'let*)
-                (walk-let* (cdr expr) env))
-               ;; (letrec* ((var val) ...) body ...)
-               ((eq? head 'letrec*)
-                (walk-letrec (cdr expr) env))  ;; same semantics as letrec for our purposes
-               ;; (when test body ...) / (unless test body ...)
-               ((or (eq? head 'when) (eq? head 'unless))
-                (for-each (lambda (e) (walk e env)) (cdr expr)))
-               ;; (case-lambda ((params ...) body ...) ...)
-               ((eq? head 'case-lambda)
-                (walk-case-lambda (cdr expr) env))
-               ;; (parameterize ((param val) ...) body ...)
-               ((eq? head 'parameterize)
-                (walk-parameterize (cdr expr) env))
-               ;; (guard (var clause ...) body ...)
-               ((eq? head 'guard)
-                (walk-guard (cdr expr) env))
-               ;; (quote ...) - skip entirely, no identifiers to resolve
-               ((eq? head 'quote) (values))
-               ;; (if test then else)
-               ((eq? head 'if)
-                (for-each (lambda (e) (walk e env)) (cdr expr)))
-               ;; (begin expr ...)
-               ((eq? head 'begin)
-                (walk-body (cdr expr) env))
-               ;; (set! var expr)
-               ((eq? head 'set!)
-                (when (and (pair? (cdr expr)) (symbol? (cadr expr)))
-                  (unless (memq (cadr expr) env)
-                    (set! unbound (cons (cadr expr) unbound))))
-                (when (and (pair? (cdr expr)) (pair? (cddr expr)))
-                  (walk (caddr expr) env)))
-               ;; (do ((var init step) ...) (test expr ...) body ...)
-               ((eq? head 'do)
-                (walk-do (cdr expr) env))
-               ;; (let-values (((var ...) expr) ...) body ...)
-               ((eq? head 'let-values)
-                (walk-let-values (cdr expr) env))
-               ;; (case expr ((datum ...) body ...) ...)
-               ((eq? head 'case)
-                (walk-case (cdr expr) env))
-               ;; (cond ...) - walk each clause
-               ((eq? head 'cond)
-                (for-each
-                 (lambda (clause)
-                   (when (pair? clause)
-                     (for-each (lambda (e) (walk e env)) clause)))
-                 (cdr expr)))
-               ;; (and ...) (or ...)
-               ((or (eq? head 'and) (eq? head 'or))
-                (for-each (lambda (e) (walk e env)) (cdr expr)))
-               ;; Forbidden forms - flag them and scan subforms for more forbidden heads
-               ((memq head '(define-syntax syntax-case syntax-rules))
-                (set! unbound (cons head unbound))
-                (for-each (lambda (e)
-                            (when (and (pair? e) (memq (car e) '(define-syntax syntax-case syntax-rules)))
-                              (walk e env)))
-                          (cdr expr)))
-               ;; General application or other form
-               (else
-                (for-each (lambda (e) (walk e env)) expr)))))))
-
-      ;; (define name expr) or (define (name . params) body ...)
-      (define (walk-define rest env)
-        (cond
-          ;; (define (name params ...) body ...)
-          ((and (pair? rest) (pair? (car rest)))
-           (let* ((sig (car rest))
-                  (name (car sig))
-                  (params (cdr sig))
-                  (body (cdr rest))
-                  (param-syms (extract-params params))
-                  (new-env (cons name (append param-syms env))))
-             (walk-body body new-env)))
-          ;; (define name expr)
-          ((and (pair? rest) (symbol? (car rest)) (pair? (cdr rest)))
-           (let ((name (car rest))
-                 (val (cadr rest)))
-             (walk val (cons name env))))
-          (else (values))))
-
-      ;; (lambda (params ...) body ...)
-      (define (walk-lambda rest env)
-        (when (and (pair? rest) (or (pair? (car rest)) (null? (car rest)) (symbol? (car rest))))
-          (let* ((params (car rest))
-                 (body (cdr rest))
-                 (param-syms (extract-params params))
-                 (new-env (append param-syms env)))
-            (walk-body body new-env))))
-
-      ;; (let ((var val) ...) body ...) or (let name ((var val) ...) body ...)
-      (define (walk-let rest env)
-        (cond
-          ;; named let: (let name ((var val) ...) body ...)
-          ((and (pair? rest) (symbol? (car rest)))
-           (let* ((name (car rest))
-                  (bindings (cadr rest))
-                  (body (cddr rest))
-                  (vars (map car bindings))
-                  (vals (map cadr bindings))
-                  (new-env (cons name (append vars env))))
-             ;; vals are evaluated in outer env (but name is available for recursion)
-             (for-each (lambda (v) (walk v env)) vals)
-             (walk-body body new-env)))
-          ;; regular let: (let ((var val) ...) body ...)
-          ((and (pair? rest) (pair? (car rest)))
-           (let* ((bindings (car rest))
-                  (body (cdr rest))
-                  (vars (map car bindings))
-                  (vals (map cadr bindings))
-                  (new-env (append vars env)))
-             ;; vals are evaluated in outer env
-             (for-each (lambda (v) (walk v env)) vals)
-             (walk-body body new-env)))
-          ;; empty let: (let () body ...)
-          ((and (pair? rest) (null? (car rest)))
-           (walk-body (cdr rest) env))
-          (else (values))))
-
-      ;; (letrec ((var val) ...) body ...)
-      (define (walk-letrec rest env)
-        (when (and (pair? rest) (or (pair? (car rest)) (null? (car rest))))
-          (let* ((bindings (if (null? (car rest)) '() (car rest)))
-                 (body (cdr rest))
-                 (vars (map car bindings))
-                 (vals (map cadr bindings))
-                 ;; In letrec, all vars are in scope for all vals and body
-                 (new-env (append vars env)))
-            (for-each (lambda (v) (walk v new-env)) vals)
-            (walk-body body new-env))))
-
-      ;; (do ((var init step) ...) (test expr ...) body ...)
-      (define (walk-do rest env)
-        (when (and (pair? rest) (pair? (cdr rest)))
-          (let* ((bindings (car rest))
-                 (termination (cadr rest))
-                 (body (cddr rest))
-                 ;; Extract var names from bindings
-                 (vars (map car bindings))
-                 (new-env (append vars env)))
-            ;; Walk init exprs in outer env
-            (for-each (lambda (binding)
-                        (when (and (pair? binding) (pair? (cdr binding)))
-                          (walk (cadr binding) env)))
-                      bindings)
-            ;; Walk step exprs in new env (vars are visible)
-            (for-each (lambda (binding)
-                        (when (and (pair? binding) (pair? (cdr binding)) (pair? (cddr binding)))
-                          (walk (caddr binding) new-env)))
-                      bindings)
-            ;; Walk termination clause in new env
-            (when (pair? termination)
-              (for-each (lambda (e) (walk e new-env)) termination))
-            ;; Walk body in new env
-            (for-each (lambda (e) (walk e new-env)) body))))
-
-      ;; (let-values (((var ...) expr) ...) body ...)
-      (define (walk-let-values rest env)
-        (when (and (pair? rest) (or (pair? (car rest)) (null? (car rest))))
-          (let* ((bindings (car rest))
-                 (body (cdr rest))
-                 ;; Extract all var names from formals lists
-                 (vars (apply append
-                             (map (lambda (binding)
-                                    (if (pair? binding)
-                                        (extract-params (car binding))
-                                        '()))
-                                  bindings)))
-                 (new-env (append vars env)))
-            ;; Walk value exprs in outer env
-            (for-each (lambda (binding)
-                        (when (and (pair? binding) (pair? (cdr binding)))
-                          (walk (cadr binding) env)))
-                      bindings)
-            ;; Walk body in new env
-            (walk-body body new-env))))
-
-      ;; (case expr ((datum ...) body ...) ...)
-      (define (walk-case rest env)
-        (when (pair? rest)
-          ;; Walk the key expression
-          (walk (car rest) env)
-          ;; Walk each clause, skipping datums
-          (for-each (lambda (clause)
-                      (when (pair? clause)
-                        ;; First element is datum list (or 'else') - skip it
-                        ;; Walk remaining elements as body expressions
-                        (if (eq? (car clause) 'else)
-                            (for-each (lambda (e) (walk e env)) (cdr clause))
-                            (for-each (lambda (e) (walk e env)) (cdr clause)))))
-                    (cdr rest))))
-
-      ;; (let* ((var val) ...) body ...) - sequential binding
-      (define (walk-let* rest env)
-        (when (and (pair? rest) (or (pair? (car rest)) (null? (car rest))))
-          (let* ((bindings (if (null? (car rest)) '() (car rest)))
-                 (body (cdr rest)))
-            ;; Process bindings sequentially: each var is visible to subsequent vals
-            (let loop ((remaining bindings) (current-env env))
-              (if (null? remaining)
-                  (walk-body body current-env)
-                  (let ((binding (car remaining)))
-                    (when (and (pair? binding) (pair? (cdr binding)))
-                      (walk (cadr binding) current-env))
-                    (let ((var (if (pair? binding) (car binding) binding)))
-                      (loop (cdr remaining) (cons var current-env)))))))))
-
-      ;; (case-lambda ((params ...) body ...) ...)
-      (define (walk-case-lambda clauses env)
-        (for-each
-         (lambda (clause)
-           (when (and (pair? clause) (or (pair? (car clause)) (null? (car clause)) (symbol? (car clause))))
-             (let* ((params (car clause))
-                    (body (cdr clause))
-                    (param-syms (extract-params params))
-                    (new-env (append param-syms env)))
-               (walk-body body new-env))))
-         clauses))
-
-      ;; (parameterize ((param val) ...) body ...)
-      (define (walk-parameterize rest env)
-        (when (and (pair? rest) (or (pair? (car rest)) (null? (car rest))))
-          (let* ((bindings (if (null? (car rest)) '() (car rest)))
-                 (body (cdr rest)))
-            ;; Walk parameter and value exprs in current env (no new bindings)
-            (for-each (lambda (binding)
-                        (when (pair? binding)
-                          (for-each (lambda (e) (walk e env)) binding)))
-                      bindings)
-            ;; Walk body in same env (parameterize doesn't introduce lexical bindings)
-            (walk-body body env))))
-
-      ;; (guard (var clause ...) body ...)
-      (define (walk-guard rest env)
-        (when (and (pair? rest) (pair? (car rest)))
-          (let* ((guard-clause (car rest))
-                 (var (car guard-clause))
-                 (clauses (cdr guard-clause))
-                 (body (cdr rest))
-                 (new-env (cons var env)))
-            ;; Walk each test/expr clause with var in scope
-            ;; Handle (else expr ...) clauses by skipping the else keyword
-            (for-each
-             (lambda (clause)
-               (when (pair? clause)
-                 (if (eq? (car clause) 'else)
-                     (for-each (lambda (e) (walk e new-env)) (cdr clause))
-                     (for-each (lambda (e) (walk e new-env)) clause))))
-             clauses)
-            ;; Walk body in outer env (guard body is evaluated before the exception)
-            (for-each (lambda (e) (walk e env)) body))))
-
-      ;; Walk a body (sequence of expressions) collecting top-level defines
-      (define (walk-body exprs env)
-        ;; First pass: collect all top-level define names
-        (let* ((defined-names
-                (filter symbol?
-                        (map (lambda (expr)
-                               (if (and (pair? expr) (eq? (car expr) 'define))
-                                   (let ((rest (cdr expr)))
-                                     (cond
-                                       ((and (pair? rest) (pair? (car rest)))
-                                        (caar rest))
-                                       ((and (pair? rest) (symbol? (car rest)))
-                                        (car rest))
-                                       (else #f)))
-                                   #f))
-                             exprs)))
-               (body-env (append defined-names env)))
-          ;; Second pass: walk each expression with all defines in scope
-          (for-each (lambda (e) (walk e body-env)) exprs)))
-
-      ;; Extract parameter symbols from a lambda formals list
-      ;; Handles: (a b c), (a b . rest), or just rest
-      (define (extract-params params)
-        (cond
-          ((null? params) '())
-          ((symbol? params) (list params))
-          ((pair? params)
-           (cons (car params) (extract-params (cdr params))))
-          (else '())))
-
-      ;; Walk the top-level body
-      (walk-body exprs '())
-
-      ;; Return deduplicated unbound list
-      (deduplicate unbound)))
-
-  ;; Remove duplicates from a list of symbols
-  (define (deduplicate syms)
-    (let loop ((remaining syms) (seen '()) (result '()))
-      (if (null? remaining)
-          (reverse result)
-          (let ((s (car remaining)))
-            (if (memq s seen)
-                (loop (cdr remaining) seen result)
-                (loop (cdr remaining) (cons s seen) (cons s result)))))))
+    (peg-collect-unbound exprs))
 
   ;; Check a list of expressions against a whitelist (list of allowed symbols).
   ;; Returns a list of violation records.

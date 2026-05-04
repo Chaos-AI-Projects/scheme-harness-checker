@@ -25,11 +25,12 @@ Detects programs that may not terminate (infinite loops / unbounded recursion) u
 ## Prerequisites
 
 - [Chez Scheme](https://cisco.github.io/ChezScheme/) (tested with ChezScheme 10.x)
+- [packrat-extended](https://github.com/user/packrat-extended) — PEG parser library for s-expression pattern matching. Expected at `../packrat-extended` relative to the project root (or provide the path via `--libdirs`).
 
 ## Usage
 
 ```sh
-scheme --libdirs src --program src/main.ss <source-file> <whitelist-file>
+scheme --libdirs src:<path-to-packrat-extended> --program src/main.ss <source-file> <whitelist-file>
 ```
 
 **Exit codes:**
@@ -78,7 +79,8 @@ harness-checker/
 ├── src/
 │   ├── main.ss                          # CLI entry point
 │   └── harness-checker/
-│       └── whitelist-checker.ss         # Core analysis library
+│       ├── whitelist-checker.ss         # Core analysis library
+│       └── peg-walker.ss               # PEG-based s-expression tree walker
 ├── data/
 │   └── minimal-safe.txt                 # Default whitelist
 ├── tests/
@@ -93,7 +95,7 @@ harness-checker/
 
 ```sh
 cd tests
-scheme --libdirs ../src --program test-whitelist-checker.ss
+scheme --libdirs ../src:<path-to-packrat-extended> --program test-whitelist-checker.ss
 ```
 
 The test suite exercises scoping rules (define, lambda, let, letrec, named let, do, case-lambda, guard, parameterize), forbidden forms (macros), and realistic LLM-generated code patterns (fibonacci, quicksort).

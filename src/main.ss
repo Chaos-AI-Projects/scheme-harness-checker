@@ -1,7 +1,7 @@
 ;; main.ss
 ;; CLI entry point for the whitelist checker.
 ;;
-;; Usage: scheme --libdirs src --program src/main.ss <source-file> <whitelist-file>
+;; Usage: scheme --libdirs src:<packrat-extended-path> --program src/main.ss <source-file> <whitelist-file>
 ;;
 ;; Exit code 0 if no violations, 1 if violations found.
 

@@ -185,7 +185,7 @@
                  (body (cdr rest))
                  (param-syms (extract-params params))
                  (new-env (append param-syms env)))
-            (for-each (lambda (e) (walk e new-env)) body))))
+            (walk-body body new-env))))
 
       ;; (let ((var val) ...) body ...) or (let name ((var val) ...) body ...)
       (define (walk-let rest env)
@@ -313,7 +313,7 @@
                     (body (cdr clause))
                     (param-syms (extract-params params))
                     (new-env (append param-syms env)))
-               (for-each (lambda (e) (walk e new-env)) body))))
+               (walk-body body new-env))))
          clauses))
 
       ;; (parameterize ((param val) ...) body ...)

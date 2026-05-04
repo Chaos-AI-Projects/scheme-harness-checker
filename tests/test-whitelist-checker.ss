@@ -302,6 +302,24 @@
                    '(= -))))
   (assert-violations-empty "internal defines are mutually visible" violations))
 
+;; --- Test group: lambda internal define mutual visibility ---
+(display "Test group: lambda internal define mutual visibility") (newline)
+
+;; Internal defines inside a lambda body should be mutually visible
+(let ((violations (check-source
+                   "(lambda (x) (define (f n) (if (= n 0) 1 (g (- n 1)))) (define (g n) (if (= n 0) 1 (f (- n 1)))) (f x))"
+                   '(= -))))
+  (assert-violations-empty "lambda internal defines are mutually visible" violations))
+
+;; --- Test group: case-lambda internal define mutual visibility ---
+(display "Test group: case-lambda internal define mutual visibility") (newline)
+
+;; Internal defines inside a case-lambda clause should be mutually visible
+(let ((violations (check-source
+                   "(case-lambda ((x) (define (f n) (if (= n 0) 1 (g (- n 1)))) (define (g n) (if (= n 0) 1 (f (- n 1)))) (f x)))"
+                   '(= -))))
+  (assert-violations-empty "case-lambda internal defines are mutually visible" violations))
+
 ;; --- Summary ---
 (newline)
 (display "Results: ")

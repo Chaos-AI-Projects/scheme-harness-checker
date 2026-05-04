@@ -25,7 +25,7 @@ Detects programs that may not terminate (infinite loops / unbounded recursion) u
 ## Prerequisites
 
 - [Chez Scheme](https://cisco.github.io/ChezScheme/) (tested with ChezScheme 10.x)
-- [packrat-extended](https://github.com/user/packrat-extended) — PEG parser library for s-expression pattern matching. Expected at `../packrat-extended` relative to the project root (or provide the path via `--libdirs`).
+- [packrat-extended](https://github.com/ChaosEternal/packrat-extended) — PEG parser library for s-expression pattern matching. Expected at `../packrat-extended` relative to the project root (or provide the path via `--libdirs`).
 
 ## Usage
 

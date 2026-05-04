@@ -24,6 +24,10 @@
   ;;   symbol  → (the-symbol . the-symbol)   — kind IS the symbol
   ;;   pair    → (#\L . the-pair)            — #\L marks a list/pair
   ;;   other   → (#\A . the-value)           — #\A marks an atom
+  ;;
+  ;; Why symbols use themselves as the kind: this lets PEG rules
+  ;; match keywords directly (e.g. 'define, 'lambda) without an
+  ;; extra symbol-kind tag or lookup table.
 
   (define (sexpr-token elem)
     (cond
@@ -151,6 +155,10 @@
        (list 'set!-form target val))
 
       ;; (quote ...) — skip entirely
+      ;; Note: malformed (quote a b ...) falls through to the generic
+      ;; rule and walks the contents; the old walker skipped the entire
+      ;; form unconditionally. This is safe since multi-arg quote is
+      ;; invalid Scheme, but the behavior differs from the old walker.
       (('quote) (list 'quote-form))
       (('quote datum <- (? any-kind?)) (list 'quote-form))
 
@@ -368,9 +376,7 @@
                (walk key env)
                (for-each (lambda (clause)
                            (when (pair? clause)
-                             (if (eq? (car clause) 'else)
-                                 (for-each (lambda (e) (walk e env)) (cdr clause))
-                                 (for-each (lambda (e) (walk e env)) (cdr clause)))))
+                             (for-each (lambda (e) (walk e env)) (cdr clause))))
                          clauses)))
 
             ((guard-form)

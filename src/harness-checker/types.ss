@@ -160,7 +160,9 @@
       ((and (type-pair? a) (type-pair? b))
        (and (subtype? (type-pair-car a) (type-pair-car b))
             (subtype? (type-pair-cdr a) (type-pair-cdr b))))
-      ;; Vector covariance
+      ;; Vector covariance (technically unsound since vectors are mutable via
+      ;; vector-set!, but acceptable for a static checker that only validates
+      ;; LLM-generated code — we prefer fewer false positives over soundness)
       ((and (type-vector? a) (type-vector? b))
        (subtype? (type-vector-elem a) (type-vector-elem b)))
       ;; A type is a subtype of a union if it's a subtype of any member

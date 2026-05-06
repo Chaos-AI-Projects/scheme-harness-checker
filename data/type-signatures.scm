@@ -133,7 +133,7 @@
 
  ;; Vectors
  (vector? . (-> Any Bool))
- (make-vector . (-> Number Any (Vector Any)))
+ (make-vector . (->* Any (Vector Any)))
  (vector . (->* Any (Vector Any)))
  (vector-length . (-> (Vector Any) Number))
  (vector-ref . (-> (Vector Any) Number Any))

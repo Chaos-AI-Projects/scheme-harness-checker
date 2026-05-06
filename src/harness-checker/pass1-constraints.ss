@@ -82,8 +82,9 @@
                              (cons (cons type source) existing))))
 
           ;; Walk expression looking for applications of known functions
-          ;; where a parameter is used as an argument
-          (define (scan expr)
+          ;; where a parameter is used as an argument.
+          ;; active-params: the currently visible (unshadowed) parameter set
+          (define (scan expr active-params)
             (when (pair? expr)
               (let ((head (car expr)))
                 (cond
@@ -93,7 +94,7 @@
                      (let loop ((remaining args) (pos 0))
                        (when (pair? remaining)
                          (let ((arg (car remaining)))
-                           (when (and (symbol? arg) (memq arg params))
+                           (when (and (symbol? arg) (memq arg active-params))
                              (let ((expected (arg-type-for head pos)))
                                (when (and expected
                                           (not (type-any? expected))
@@ -101,7 +102,7 @@
                                  (add-constraint! arg expected expr)))))
                          (loop (cdr remaining) (+ pos 1)))))
                    ;; Also scan argument expressions recursively
-                   (for-each scan (cdr expr)))
+                   (for-each (lambda (e) (scan e active-params)) (cdr expr)))
 
                   ;; Quote: skip
                   ((eq? head 'quote) (values))
@@ -124,7 +125,7 @@
                                 (when (pair? bindings)
                                   (for-each (lambda (b)
                                               (when (and (pair? b) (pair? (cdr b)))
-                                                (scan (cadr b))))
+                                                (scan (cadr b) active-params)))
                                             bindings))
                                 ;; Check if any params are shadowed
                                 (let ((bound (if (pair? bindings)
@@ -132,25 +133,25 @@
                                                  '())))
                                   (let ((unshadowed (filter (lambda (p)
                                                              (not (memq p bound)))
-                                                           params)))
+                                                           active-params)))
                                     (when (pair? unshadowed)
-                                      (for-each scan body)))))))
+                                      (for-each (lambda (e) (scan e unshadowed)) body)))))))
                            ;; Regular let: (let ((var val) ...) body ...)
                            ((pair? bindings-or-name)
                             (let ((bindings bindings-or-name)
                                   (body (cdr rest)))
                               (for-each (lambda (b)
                                           (when (and (pair? b) (pair? (cdr b)))
-                                            (scan (cadr b))))
+                                            (scan (cadr b) active-params)))
                                         bindings)
                               ;; Check shadowing
                               (let ((bound (map car bindings)))
                                 (let ((unshadowed (filter (lambda (p)
                                                            (not (memq p bound)))
-                                                         params)))
+                                                         active-params)))
                                   (when (pair? unshadowed)
-                                    (for-each scan body))))))
-                           (else (for-each scan (cdr rest))))))))
+                                    (for-each (lambda (e) (scan e unshadowed)) body))))))
+                           (else (for-each (lambda (e) (scan e active-params)) (cdr rest))))))))
 
                   ;; Define: scan value but don't shadow our params
                   ((eq? head 'define)
@@ -161,18 +162,18 @@
                          ((pair? (car rest)) (values))
                          ;; (define x val)
                          ((and (symbol? (car rest)) (pair? (cdr rest)))
-                          (scan (cadr rest)))
+                          (scan (cadr rest) active-params))
                          (else (values))))))
 
                   ;; If, cond, when, unless, begin, and, or: scan sub-exprs
                   ((memq head '(if cond when unless begin and or set!))
-                   (for-each scan (cdr expr)))
+                   (for-each (lambda (e) (scan e active-params)) (cdr expr)))
 
                   ;; Generic: scan all sub-expressions
                   (else
-                   (for-each scan expr))))))
+                   (for-each (lambda (e) (scan e active-params)) expr))))))
 
-          (for-each scan body-exprs)
+          (for-each (lambda (e) (scan e params)) body-exprs)
           ;; Convert hashtable to alist
           (let-values (((keys vals) (hashtable-entries constraints)))
             (let loop ((i 0) (result '()))
@@ -206,24 +207,27 @@
               (loop (cdr remaining) (+ idx 1))))))
 
       ;; Process a lambda body: extract params, collect constraints, check
-      ;; Returns alist of (param . resolved-type) for non-contradictory params
+      ;; Returns alist of (param . resolved-type) ordered by original parameter list
       (define (process-lambda params body-exprs)
         (let ((constraints (collect-body-constraints params body-exprs signatures)))
           ;; Check each parameter's constraints for contradictions
-          (let ((resolved '()))
+          (let ((constraint-table (make-eq-hashtable)))
+            ;; Index constraints by param for fast lookup
             (for-each
              (lambda (entry)
                (let ((param (car entry))
                      (type-source-pairs (cdr entry)))
                  (check-contradictions param type-source-pairs)
-                 ;; If no contradiction recorded for this param, use the most specific type
-                 ;; (pick first non-Any constraint as representative)
                  (let ((types (map car type-source-pairs)))
                    (when (pair? types)
-                     (set! resolved
-                       (cons (cons param (car types)) resolved))))))
+                     (hashtable-set! constraint-table param (car types))))))
              constraints)
-            resolved)))
+            ;; Build resolved alist ordered by original parameter list
+            (filter values
+                    (map (lambda (p)
+                           (let ((typ (hashtable-ref constraint-table p #f)))
+                             (if typ (cons p typ) #f)))
+                         params)))))
 
       ;; Walk all expressions finding lambda/define definitions
       (define (walk-top-level expr)

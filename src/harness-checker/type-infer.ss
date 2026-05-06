@@ -306,9 +306,7 @@
                                                     type:any)))
                                         bindings)
                                    env))))
-                              (new-env (if (eq? head 'let*)
-                                           bind-env
-                                           bind-env)))
+                              (new-env bind-env))
                          (infer-body body new-env)))))))))
 
       ;; ---------------------------------------------------------------

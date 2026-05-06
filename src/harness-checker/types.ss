@@ -295,9 +295,9 @@
 
   ;; Load type signatures from a file.
   ;; Returns an alist of (symbol . type).
+  ;; Uses call-with-port to ensure the port is closed even if read throws.
   (define (load-type-signatures path)
-    (let* ((port (open-input-file path))
-           (data (read port)))
-      (close-port port)
-      (map parse-type-signature data)))
+    (call-with-port (open-input-file path)
+      (lambda (port)
+        (map parse-type-signature (read port)))))
 )

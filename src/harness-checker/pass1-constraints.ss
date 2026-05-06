@@ -48,7 +48,8 @@
   ;;   errors: list of constraint-error records
   (define (infer-param-constraints exprs signatures)
     (let ((errors '())
-          (param-types '()))
+          (param-types '())
+          (param-arities '()))
 
       (define (record-error! err)
         (set! errors (cons err errors)))
@@ -185,29 +186,51 @@
                               result)))))))
 
       ;; Check constraints for contradictions.
-      ;; Two types contradict if neither is a subtype of the other
-      ;; and they are both concrete (not Any/type-var).
+      ;; Consolidates all conflicting types into a single error per parameter
+      ;; rather than emitting separate pairwise errors.
       (define (check-contradictions param constraint-pairs)
-        (let ((types (map car constraint-pairs)))
-          (let loop ((remaining types) (idx 0))
-            (when (pair? remaining)
-              (let ((t1 (car remaining)))
-                (let inner ((rest (cdr remaining)) (j (+ idx 1)))
-                  (when (pair? rest)
-                    (let ((t2 (car rest)))
-                      (when (and (not (subtype? t1 t2))
-                                 (not (subtype? t2 t1)))
-                        (record-error!
-                         (make-constraint-error
-                          param
-                          (list t1 t2)
-                          (list (cdr (list-ref constraint-pairs idx))
-                                (cdr (list-ref constraint-pairs j)))))))
-                    (inner (cdr rest) (+ j 1)))))
-              (loop (cdr remaining) (+ idx 1))))))
+        (let ((types (map car constraint-pairs))
+              (sources (map cdr constraint-pairs)))
+          ;; Collect unique types
+          (let ((unique (fold-left
+                          (lambda (acc t)
+                            (if (exists (lambda (u) (type=? t u)) acc)
+                                acc
+                                (cons t acc)))
+                          '()
+                          types)))
+            ;; Check if any pair of unique types is incompatible
+            (let ((has-conflict
+                   (let outer ((remaining unique))
+                     (if (null? remaining)
+                         #f
+                         (or (exists (lambda (t2)
+                                       (and (not (subtype? (car remaining) t2))
+                                            (not (subtype? t2 (car remaining)))))
+                                     (cdr remaining))
+                             (outer (cdr remaining)))))))
+              (when has-conflict
+                (record-error!
+                 (make-constraint-error
+                  param
+                  (reverse unique)
+                  sources)))))))
+
+      ;; Pick the most specific type from a list of consistent types.
+      ;; If t is a subtype of best, prefer t (more specific).
+      (define (most-specific-type types)
+        (fold-left
+         (lambda (best t)
+           (cond
+             ((subtype? t best) t)
+             ((subtype? best t) best)
+             (else best)))
+         (car types)
+         (cdr types)))
 
       ;; Process a lambda body: extract params, collect constraints, check
-      ;; Returns alist of (param . resolved-type) ordered by original parameter list
+      ;; Returns alist of (param . resolved-type) for ALL params, ordered by
+      ;; the original parameter list. Unconstrained params get Any.
       (define (process-lambda params body-exprs)
         (let ((constraints (collect-body-constraints params body-exprs signatures)))
           ;; Check each parameter's constraints for contradictions
@@ -220,14 +243,13 @@
                  (check-contradictions param type-source-pairs)
                  (let ((types (map car type-source-pairs)))
                    (when (pair? types)
-                     (hashtable-set! constraint-table param (car types))))))
+                     (hashtable-set! constraint-table param
+                                     (most-specific-type types))))))
              constraints)
-            ;; Build resolved alist ordered by original parameter list
-            (filter values
-                    (map (lambda (p)
-                           (let ((typ (hashtable-ref constraint-table p #f)))
-                             (if typ (cons p typ) #f)))
-                         params)))))
+            ;; Build resolved alist for ALL params — unconstrained get Any
+            (map (lambda (p)
+                   (cons p (hashtable-ref constraint-table p type:any)))
+                 params))))
 
       ;; Walk all expressions finding lambda/define definitions
       (define (walk-top-level expr)
@@ -244,11 +266,17 @@
                            (formals (cdr sig))
                            (params (extract-params formals))
                            (body (cdr rest)))
+                      ;; Record arity info
+                      (set! param-arities
+                        (cons (list name
+                                    (count-fixed-params formals)
+                                    (has-rest-param? formals))
+                              param-arities))
+                      ;; Record param types (all params, including unconstrained)
                       (when (pair? params)
                         (let ((resolved (process-lambda params body)))
-                          (when (pair? resolved)
-                            (set! param-types
-                              (cons (cons name resolved) param-types)))))))
+                          (set! param-types
+                            (cons (cons name resolved) param-types))))))
                    ;; (define name (lambda (params...) body...))
                    ((and (pair? rest) (symbol? (car rest))
                          (pair? (cdr rest)) (pair? (cadr rest))
@@ -258,11 +286,17 @@
                            (formals (cadr lam))
                            (params (extract-params formals))
                            (body (cddr lam)))
+                      ;; Record arity info
+                      (set! param-arities
+                        (cons (list name
+                                    (count-fixed-params formals)
+                                    (has-rest-param? formals))
+                              param-arities))
+                      ;; Record param types
                       (when (pair? params)
                         (let ((resolved (process-lambda params body)))
-                          (when (pair? resolved)
-                            (set! param-types
-                              (cons (cons name resolved) param-types)))))))
+                          (set! param-types
+                            (cons (cons name resolved) param-types))))))
                    (else (values)))))
 
               ((lambda)
@@ -283,9 +317,29 @@
            (cons (car formals) (extract-params (cdr formals))))
           (else '())))
 
+      ;; Check if formals include a rest parameter (improper list or bare symbol)
+      (define (has-rest-param? formals)
+        (cond
+          ((null? formals) #f)
+          ((symbol? formals) #t)
+          ((pair? formals)
+           (if (symbol? (cdr formals))
+               #t
+               (has-rest-param? (cdr formals))))
+          (else #f)))
+
+      ;; Count the number of fixed (non-rest) parameters
+      (define (count-fixed-params formals)
+        (cond
+          ((null? formals) 0)
+          ((symbol? formals) 0)
+          ((pair? formals)
+           (+ 1 (count-fixed-params (cdr formals))))
+          (else 0)))
+
       ;; Run the analysis
       (for-each walk-top-level exprs)
 
-      ;; Return results
-      (cons param-types (reverse errors))))
+      ;; Return results: (param-types param-arities errors)
+      (list param-types param-arities (reverse errors))))
 )

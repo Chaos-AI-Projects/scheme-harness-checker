@@ -36,8 +36,9 @@
   ;; Check types in a list of expressions.
   ;; signatures: alist of (symbol . type) from type-signatures.scm
   ;; param-types: alist of (fn-name . ((param . type) ...)) from Pass 1
+  ;; param-arities: alist of (fn-name fixed-count has-rest?) from Pass 1
   ;; Returns: list of type-error records
-  (define (check-types exprs signatures param-types)
+  (define (check-types exprs signatures param-types param-arities)
     (let ((errors '()))
 
       (define (record-error! err)
@@ -215,7 +216,33 @@
             (cond
               ;; (define (f args...) body...)
               ((pair? (car rest))
-               (values))  ;; handled at top-level
+               (let* ((name (caar rest))
+                      (formals (cdar rest))
+                      (params (extract-params formals))
+                      (body (cdr rest))
+                      ;; Look up Pass 1 constraints for this function
+                      (fn-constraints (assq name param-types))
+                      (param-env
+                       (if fn-constraints
+                           (cdr fn-constraints)
+                           (map (lambda (p) (cons p type:any)) params)))
+                      (new-env (append param-env env)))
+                 (infer-body body new-env)))
+              ;; (define name (lambda (params...) body...))
+              ((and (symbol? (car rest)) (pair? (cdr rest))
+                    (pair? (cadr rest)) (eq? (caadr rest) 'lambda))
+               (let* ((name (car rest))
+                      (lam (cadr rest))
+                      (formals (cadr lam))
+                      (params (extract-params formals))
+                      (body (cddr lam))
+                      (fn-constraints (assq name param-types))
+                      (param-env
+                       (if fn-constraints
+                           (cdr fn-constraints)
+                           (map (lambda (p) (cons p type:any)) params)))
+                      (new-env (append param-env env)))
+                 (infer-body body new-env)))
               ;; (define x val)
               ((and (symbol? (car rest)) (pair? (cdr rest)))
                (infer (cadr rest) env))
@@ -434,7 +461,33 @@
 
                 ;; Not in signatures — check if it's a user-defined function
                 ;; with Pass 1 constraints
-                (let ((user-fn (assq fn param-types)))
+                (let ((user-fn (assq fn param-types))
+                      (user-arity (assq fn param-arities)))
+                  ;; Check arity for user-defined functions
+                  (when user-arity
+                    (let ((fixed-count (cadr user-arity))
+                          (has-rest? (caddr user-arity)))
+                      (if has-rest?
+                          ;; Variadic: check minimum arity
+                          (when (< argc fixed-count)
+                            (record-error!
+                             (make-type-error
+                              'arity
+                              call-expr
+                              (string-append (number->string fixed-count) "+")
+                              (number->string argc)
+                              fn
+                              #f)))
+                          ;; Fixed arity: check exact match
+                          (unless (= argc fixed-count)
+                            (record-error!
+                             (make-type-error
+                              'arity
+                              call-expr
+                              (number->string fixed-count)
+                              (number->string argc)
+                              fn
+                              #f))))))
                   (if user-fn
                       (let ((param-constraints (cdr user-fn)))
                         ;; Check argument types against inferred constraints

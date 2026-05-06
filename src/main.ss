@@ -46,9 +46,10 @@
                ;; Pass 1: infer parameter constraints
                (pass1-result (infer-param-constraints exprs signatures))
                (param-types (car pass1-result))
-               (p1-errors (cdr pass1-result))
+               (param-arities (cadr pass1-result))
+               (p1-errors (caddr pass1-result))
                ;; Pass 2: type inference and call-site checking
-               (p2-errors (check-types exprs signatures param-types)))
+               (p2-errors (check-types exprs signatures param-types param-arities)))
           (set! constraint-errors p1-errors)
           (set! type-errors p2-errors)))
 
@@ -61,9 +62,11 @@
            (display (constraint-error-param err))
            (display "' has contradictory constraints: ")
            (let ((types (constraint-error-constraints err)))
-             (display (type->string (car types)))
-             (display " vs ")
-             (display (type->string (cadr types))))
+             (let loop ((remaining types) (first? #t))
+               (when (pair? remaining)
+                 (unless first? (display " vs "))
+                 (display (type->string (car remaining)))
+                 (loop (cdr remaining) #f))))
            (newline)
            (let ((sources (constraint-error-sources err)))
              (for-each

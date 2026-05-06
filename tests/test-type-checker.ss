@@ -85,8 +85,9 @@
   (let* ((exprs (read-all-expressions source))
          (pass1-result (infer-param-constraints exprs signatures))
          (param-types (car pass1-result))
-         (p1-errors (cdr pass1-result))
-         (p2-errors (check-types exprs signatures param-types)))
+         (param-arities (cadr pass1-result))
+         (p1-errors (caddr pass1-result))
+         (p2-errors (check-types exprs signatures param-types param-arities)))
     (cons p1-errors p2-errors)))
 
 (define (get-constraint-errors result) (car result))
@@ -342,6 +343,56 @@
 ;; Unknown function (not in signatures) - no error
 (let* ((result (check-source-types "(define (f x) (f x))")))
   (assert-no-errors "recursive call to user fn" (get-type-errors result)))
+
+;; ===================================================================
+;; Test Group: Consolidated contradiction errors
+;; ===================================================================
+(display "Test group: consolidated contradiction errors") (newline)
+
+(let* ((result (check-source-types
+  "(define (f x) (+ x 1) (car x) (string-length x))"))
+       (c-errors (get-constraint-errors result)))
+  (assert-error-count "three-way contradiction emits single error" 1 c-errors))
+
+;; ===================================================================
+;; Test Group: User-defined function arity
+;; ===================================================================
+(display "Test group: user-defined function arity") (newline)
+
+(let* ((result (check-source-types "(define (f x y) (+ x y)) (f 1)"))
+       (errors (get-type-errors result)))
+  (assert-has-arity-error "user fn too few args" 'f errors))
+
+(let* ((result (check-source-types "(define (f x) (+ x 1)) (f 1 2 3)"))
+       (errors (get-type-errors result)))
+  (assert-has-arity-error "user fn too many args" 'f errors))
+
+(let* ((result (check-source-types "(define (f x y) (+ x y)) (f 1 2)"))
+       (errors (get-type-errors result)))
+  (assert-no-errors "user fn correct arity" errors))
+
+(let* ((result (check-source-types "(define (f) 42) (f 1)"))
+       (errors (get-type-errors result)))
+  (assert-has-arity-error "zero-param fn called with args" 'f errors))
+
+;; ===================================================================
+;; Test Group: Body type inference with Pass 1 constraints
+;; ===================================================================
+(display "Test group: body type inference") (newline)
+
+;; x is constrained to Number by +, y is bound to x (Number),
+;; so string-length on y is a type error
+(let* ((result (check-source-types
+  "(define (f x) (+ x 1) (let ((y x)) (string-length y)))"))
+       (errors (get-type-errors result)))
+  (assert-has-type-error "body inference catches let-bound constraint violation"
+    'string-length errors))
+
+;; Verify that body inference doesn't produce false positives
+(let* ((result (check-source-types
+  "(define (f x) (+ x 1) (let ((y x)) (* y 2)))"))
+       (errors (get-type-errors result)))
+  (assert-no-errors "body inference no false positive" errors))
 
 ;; ===================================================================
 ;; Summary

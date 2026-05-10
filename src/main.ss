@@ -1,8 +1,11 @@
 ;; main.ss
-;; CLI entry point for the whitelist checker and type checker.
+;; CLI entry point for the whitelist checker, type checker, and termination analysis.
 ;;
 ;; Usage:
-;;   scheme --libdirs src:<packrat-extended-path> --program src/main.ss <source-file> <whitelist-file> [<type-signatures-file>]
+;;   scheme --libdirs src:<packrat-extended-path> --program src/main.ss [--termination] <source-file> <whitelist-file> [<type-signatures-file>]
+;;
+;; Flags:
+;;   --termination  Enable termination analysis pass (disabled by default)
 ;;
 ;; Exit code 0 if no violations, 1 if violations found.
 
@@ -10,20 +13,45 @@
         (harness-checker whitelist-checker)
         (harness-checker types)
         (harness-checker pass1-constraints)
-        (harness-checker type-infer))
+        (harness-checker type-infer)
+        (harness-checker termination))
+
+;; Extract --flags from args, returning (flags . positional-args)
+(define (parse-flags args)
+  (let loop ((remaining (cdr args))  ;; skip program name
+             (flags '())
+             (positional '()))
+    (cond
+      ((null? remaining)
+       (cons flags (reverse positional)))
+      ((and (string? (car remaining))
+            (> (string-length (car remaining)) 2)
+            (char=? (string-ref (car remaining) 0) #\-)
+            (char=? (string-ref (car remaining) 1) #\-))
+       (loop (cdr remaining)
+             (cons (car remaining) flags)
+             positional))
+      (else
+       (loop (cdr remaining)
+             flags
+             (cons (car remaining) positional))))))
 
 (define (main args)
-  (when (< (length args) 3)
-    (display "Usage: scheme --libdirs src --program src/main.ss <source-file> <whitelist-file> [<type-signatures-file>]")
-    (newline)
-    (exit 1))
-  (let* ((source-path (cadr args))
-         (whitelist-path (caddr args))
-         (signatures-path (if (> (length args) 3) (cadddr args) #f))
-         (source-str (read-source-file source-path))
-         (exprs (read-all-expressions source-str))
-         (whitelist (load-whitelist whitelist-path))
-         (wl-violations (check-expressions exprs whitelist)))
+  (let* ((parsed (parse-flags args))
+         (flags (car parsed))
+         (positional (cdr parsed))
+         (termination-enabled? (member "--termination" flags)))
+    (when (< (length positional) 2)
+      (display "Usage: scheme --libdirs src --program src/main.ss [--termination] <source-file> <whitelist-file> [<type-signatures-file>]")
+      (newline)
+      (exit 1))
+    (let* ((source-path (car positional))
+           (whitelist-path (cadr positional))
+           (signatures-path (if (> (length positional) 2) (caddr positional) #f))
+           (source-str (read-source-file source-path))
+           (exprs (read-all-expressions source-str))
+           (whitelist (load-whitelist whitelist-path))
+           (wl-violations (check-expressions exprs whitelist)))
 
     ;; Report whitelist violations
     (unless (null? wl-violations)
@@ -109,10 +137,38 @@
               (newline))))
          type-errors))
 
+      ;; Run termination analysis if enabled
+      (let ((term-violations '()))
+        (when termination-enabled?
+          (let ((tv (check-termination exprs
+                      (if signatures-path
+                          (load-type-signatures signatures-path)
+                          '()))))
+            (set! term-violations tv)))
+
+        ;; Report termination violations
+        (unless (null? term-violations)
+          (display "TERMINATION VIOLATIONS:") (newline)
+          (for-each
+           (lambda (v)
+             (display "  - ")
+             (display (termination-violation-kind v))
+             (when (termination-violation-function v)
+               (display " in ")
+               (display (termination-violation-function v)))
+             (display ": ")
+             (display (termination-violation-reason v))
+             (newline)
+             (display "      at: ")
+             (write (termination-violation-expr v))
+             (newline))
+           term-violations))
+
       ;; Final summary and exit
       (let ((total-violations (+ (length wl-violations)
                                  (length constraint-errors)
-                                 (length type-errors))))
+                                 (length type-errors)
+                                 (length term-violations))))
         (if (= total-violations 0)
             (begin
               (display "OK: No violations found.") (newline)
@@ -120,7 +176,7 @@
             (begin
               (display total-violations)
               (display " violation(s) total.") (newline)
-              (exit 1)))))))
+              (exit 1)))))))))
 
 ;; Read source file contents as a string
 (define (read-source-file path)

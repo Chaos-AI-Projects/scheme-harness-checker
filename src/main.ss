@@ -66,12 +66,16 @@
          (newline))
        wl-violations))
 
+    ;; Load type signatures once if provided (shared by type checker and termination analysis)
+    (let ((signatures (if signatures-path
+                          (load-type-signatures signatures-path)
+                          '())))
+
     ;; Run type checker if signatures file provided
     (let ((type-errors '())
           (constraint-errors '()))
       (when signatures-path
-        (let* ((signatures (load-type-signatures signatures-path))
-               ;; Pass 1: infer parameter constraints
+        (let* (;; Pass 1: infer parameter constraints
                (pass1-result (infer-param-constraints exprs signatures))
                (param-types (car pass1-result))
                (param-arities (cadr pass1-result))
@@ -140,10 +144,7 @@
       ;; Run termination analysis if enabled
       (let ((term-violations '()))
         (when termination-enabled?
-          (let ((tv (check-termination exprs
-                      (if signatures-path
-                          (load-type-signatures signatures-path)
-                          '()))))
+          (let ((tv (check-termination exprs signatures)))
             (set! term-violations tv)))
 
         ;; Report termination violations
@@ -176,7 +177,7 @@
             (begin
               (display total-violations)
               (display " violation(s) total.") (newline)
-              (exit 1)))))))))
+              (exit 1))))))))))
 
 ;; Read source file contents as a string
 (define (read-source-file path)

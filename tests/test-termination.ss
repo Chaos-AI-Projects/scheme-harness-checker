@@ -360,6 +360,63 @@
     (and (assq 'pong defs) #t)))
 
 ;; ============================================================
+;; Test Group: Internal (nested) defines
+;; ============================================================
+(display "=== Internal defines ===") (newline)
+
+(let ((defs (extract-definitions
+              (read-all-expressions
+                "(define (outer x) (define (inner y) (+ y 1)) (inner x))"))))
+  (assert-equal "extracts both outer and inner defines"
+    2
+    (length defs))
+  (assert-true "extracts outer"
+    (and (assq 'outer defs) #t))
+  (assert-true "extracts inner"
+    (and (assq 'inner defs) #t)))
+
+(let ((graph (source->call-graph
+               "(define (outer x) (define (inner y) (+ y 1)) (inner x))")))
+  (assert-true "outer calls inner"
+    (list-contains? (call-graph-edges graph 'outer) 'inner))
+  (assert-equal "inner has no edges"
+    '()
+    (call-graph-edges graph 'inner)))
+
+;; ============================================================
+;; Test Group: Call position vs argument position
+;; ============================================================
+(display "=== Call position distinction ===") (newline)
+
+;; In (f (g x)), both f and g are in call position.
+;; But in (h 'f), f is NOT in call position (it's quoted).
+(let ((graph (source->call-graph
+               (string-append
+                 "(define (f x) (g x)) "
+                 "(define (g y) y) "
+                 "(define (h z) (list 'f z))"))))
+  (assert-equal "f calls g"
+    '(g)
+    (call-graph-edges graph 'f))
+  (assert-equal "g has no edges"
+    '()
+    (call-graph-edges graph 'g))
+  (assert-equal "h does not call f (quoted)"
+    '()
+    (call-graph-edges graph 'h)))
+
+;; Nested call: (f (g (h x))) should record f->g and f->h
+(let ((graph (source->call-graph
+               (string-append
+                 "(define (f x) (g (h x))) "
+                 "(define (g y) y) "
+                 "(define (h z) z)"))))
+  (assert-true "f calls g (in call position)"
+    (list-contains? (call-graph-edges graph 'f) 'g))
+  (assert-true "f calls h (nested in argument)"
+    (list-contains? (call-graph-edges graph 'f) 'h)))
+
+;; ============================================================
 ;; Test Group: Empty and edge cases
 ;; ============================================================
 (display "=== Edge cases ===") (newline)

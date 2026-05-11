@@ -47,12 +47,13 @@
   ;; Phase 2: Definition extraction
   ;; ---------------------------------------------------------------
 
-  ;; Extract top-level function definitions from a list of expressions.
-  ;; Handles:
+  ;; Extract function definitions from a list of expressions.
+  ;; Handles both top-level and internal (nested) defines:
   ;;   (define (name params...) body...)
   ;;   (define name (lambda (params...) body...))
   ;;   (define name (case-lambda (formals body...) ...))
   ;;   letrec/letrec* bindings with lambda values
+  ;; Recursively processes body expressions to find internal defines.
   ;; Returns alist of (name . body-exprs)
   (define (extract-definitions exprs)
     (let ((defs '()))
@@ -66,7 +67,9 @@
                   (symbol? (caadr expr)))
              (let ((name (caadr expr))
                    (body (cddr expr)))
-               (set! defs (cons (cons name body) defs))))
+               (set! defs (cons (cons name body) defs))
+               ;; Recurse into body to find internal defines
+               (for-each process-expr body)))
 
             ;; (define name (lambda (...) body...))
             ((and (eq? (car expr) 'define)
@@ -78,7 +81,9 @@
                   (pair? (cdr (caddr expr))))
              (let ((name (cadr expr))
                    (body (cddr (caddr expr))))
-               (set! defs (cons (cons name body) defs))))
+               (set! defs (cons (cons name body) defs))
+               ;; Recurse into body to find internal defines
+               (for-each process-expr body)))
 
             ;; (define name (case-lambda clause...))
             ((and (eq? (car expr) 'define)
@@ -93,7 +98,9 @@
                                       (map (lambda (c)
                                              (if (pair? c) (cdr c) '()))
                                            clauses))))
-               (set! defs (cons (cons name all-bodies) defs))))
+               (set! defs (cons (cons name all-bodies) defs))
+               ;; Recurse into clause bodies to find internal defines
+               (for-each process-expr all-bodies)))
 
             ;; (letrec ((name (lambda ...)) ...) body...)
             ;; (letrec* ((name (lambda ...)) ...) body...)
@@ -110,8 +117,20 @@
                            (pair? (cdr (cadr binding))))
                   (let ((name (car binding))
                         (body (cddr (cadr binding))))
-                    (set! defs (cons (cons name body) defs)))))
-              (cadr expr))))))
+                    (set! defs (cons (cons name body) defs))
+                    ;; Recurse into body to find internal defines
+                    (for-each process-expr body))))
+              (cadr expr))
+             ;; Also recurse into the letrec body expressions
+             (for-each process-expr (cddr expr)))
+
+            ;; For other compound expressions, recurse to find nested defines
+            (else
+             (for-each
+              (lambda (sub)
+                (when (pair? sub)
+                  (process-expr sub)))
+              (cdr expr))))))
 
       (for-each process-expr exprs)
       (reverse defs)))
@@ -122,6 +141,9 @@
 
   ;; Collect all symbols in call position within body expressions
   ;; that match target-names. Skips quoted forms.
+  ;; Distinguishes call position (car of application) from argument position:
+  ;; only the car is checked as a potential call, then recursion proceeds
+  ;; into the argument sub-expressions (cdr) only.
   ;; Returns a deduplicated list of called function names.
   (define (collect-calls-in-body body-exprs target-names)
     (let ((calls '()))
@@ -132,8 +154,11 @@
             (when (and (symbol? (car expr))
                        (memq (car expr) target-names))
               (set! calls (cons (car expr) calls)))
-            ;; Recurse into all sub-expressions
-            (for-each walk expr))))
+            ;; If car is a compound expression, recurse into it too
+            (when (pair? (car expr))
+              (walk (car expr)))
+            ;; Recurse into argument sub-expressions only
+            (for-each walk (cdr expr)))))
       (for-each walk body-exprs)
       (deduplicate calls)))
 

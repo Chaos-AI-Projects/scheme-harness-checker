@@ -5,6 +5,8 @@
 ;; Phase 1 (scaffolding): stub returning empty list for all inputs.
 ;; Phase 2 (call graph): build directed call graph from top-level definitions
 ;;   and identify strongly connected components (SCCs) for recursion analysis.
+;; Phase 3 (do-form analysis): analyze do-loop constructs for termination by
+;;   verifying exit conditions and step expressions.
 
 (library (harness-checker termination)
   (export check-termination
@@ -18,12 +20,14 @@
           build-call-graph
           call-graph-edges
           extract-definitions
-          tarjan-scc)
+          tarjan-scc
+          ;; Phase 3: do-form analysis
+          analyze-do-forms)
   (import (rnrs))
 
   ;; Record type for termination violations.
   ;; Fields:
-  ;;   kind     - symbol: 'unbounded-loop | 'unbounded-recursion | 'no-base-case | 'no-exit-condition
+  ;;   kind     - symbol: 'infinite-loop | 'unbounded-loop | 'unbounded-recursion | 'no-base-case | 'no-exit-condition
   ;;   function - symbol or #f: name of the function/construct involved
   ;;   expr     - the offending s-expression
   ;;   reason   - string: human-readable explanation
@@ -253,12 +257,101 @@
       result))
 
   ;; ---------------------------------------------------------------
+  ;; Phase 3: Do-form analysis
+  ;; ---------------------------------------------------------------
+
+  ;; Check if an expression references any of the given symbols.
+  ;; Skips quoted forms.
+  (define (expr-references-any? expr symbols)
+    (cond
+      ((null? symbols) #f)
+      ((symbol? expr) (and (memq expr symbols) #t))
+      ((not (pair? expr)) #f)
+      ((eq? (car expr) 'quote) #f)
+      (else (or (expr-references-any? (car expr) symbols)
+                (expr-references-any? (cdr expr) symbols)))))
+
+  ;; Analyze all do-forms in a list of expressions for termination issues.
+  ;; Checks:
+  ;;   - termination test is not trivially false (#f)
+  ;;   - at least one loop variable has a step expression
+  ;;   - termination test references at least one loop variable
+  ;; Returns a list of termination-violation records with kind 'infinite-loop.
+  (define (analyze-do-forms exprs)
+    (let ((violations '()))
+      (define (add-violation! do-expr reason)
+        (set! violations
+          (cons (make-termination-violation 'infinite-loop #f do-expr reason)
+                violations)))
+
+      (define (walk expr)
+        (when (pair? expr)
+          (unless (eq? (car expr) 'quote)
+            (when (eq? (car expr) 'do)
+              (check-do-form expr))
+            ;; Walk car if it is a compound expression (for nested do-forms)
+            (when (pair? (car expr))
+              (walk (car expr)))
+            ;; Walk sub-expressions
+            (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+                      (cdr expr)))))
+
+      (define (check-do-form do-expr)
+        (when (and (pair? (cdr do-expr))
+                   (pair? (cddr do-expr)))
+          (let* ((bindings (cadr do-expr))
+                 (termination (caddr do-expr))
+                 ;; Extract loop variable names from bindings
+                 (vars (if (and (pair? bindings) (list? bindings))
+                           (let lp ((bs bindings) (acc '()))
+                             (if (null? bs)
+                                 (reverse acc)
+                                 (lp (cdr bs)
+                                     (if (and (pair? (car bs))
+                                              (symbol? (caar bs)))
+                                         (cons (caar bs) acc)
+                                         acc))))
+                           '()))
+                 ;; Check if any binding has a step expression
+                 (has-any-step?
+                  (and (pair? bindings)
+                       (let lp ((bs bindings))
+                         (cond
+                           ((null? bs) #f)
+                           ((and (pair? (car bs))
+                                 (pair? (cdar bs))
+                                 (pair? (cddar bs)))
+                            #t)
+                           (else (lp (cdr bs))))))))
+            (cond
+              ;; Test is literally #f -- loop never exits
+              ((and (pair? termination)
+                    (eq? (car termination) #f))
+               (add-violation! do-expr
+                 "do-form test is always false (#f)"))
+
+              ;; No step expressions -- loop variables never change
+              ((and (not (null? vars)) (not has-any-step?))
+               (add-violation! do-expr
+                 "do-form has no step expressions; loop variables never change"))
+
+              ;; Test does not reference any loop variable
+              ((and (pair? termination)
+                    (not (null? vars))
+                    has-any-step?
+                    (not (expr-references-any? (car termination) vars)))
+               (add-violation! do-expr
+                 "do-form test does not reference any loop variable"))))))
+
+      (for-each walk exprs)
+      (reverse violations)))
+
+  ;; ---------------------------------------------------------------
   ;; Main entry point
   ;; ---------------------------------------------------------------
 
   ;; check-termination : (list-of expr) x type-env -> (list-of termination-violation)
   ;; Analyzes expressions for potential non-termination.
-  ;; Currently builds the call graph but does not yet generate violations.
   (define (check-termination exprs type-env)
-    '())
+    (analyze-do-forms exprs))
 )

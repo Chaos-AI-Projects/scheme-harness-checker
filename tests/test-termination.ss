@@ -129,7 +129,7 @@
   (check-source-termination
     "(define (factorial n) (if (= n 0) 1 (* n (factorial (- n 1)))))"))
 
-(assert-no-violations "do loop (no violations yet)"
+(assert-no-violations "valid do loop"
   (check-source-termination
     "(do ((i 0 (+ i 1))) ((= i 10) i) (display i))"))
 
@@ -437,6 +437,79 @@
   (assert-equal "single self-recursive function: one SCC"
     1
     (length sccs)))
+
+;; ============================================================
+;; Test Group: Do-form analysis - valid forms (no violations)
+;; ============================================================
+(display "=== Do-form analysis: valid ===") (newline)
+
+(assert-no-violations "do with step and test passes"
+  (check-source-termination
+    "(do ((i 0 (+ i 1))) ((= i 10)) (display i))"))
+
+(assert-no-violations "do with multiple bindings, one has step"
+  (check-source-termination
+    "(do ((i 0 (+ i 1)) (j 0)) ((= i 10)) (display i))"))
+
+(assert-no-violations "do with all bindings having steps"
+  (check-source-termination
+    "(do ((i 0 (+ i 1)) (j 10 (- j 1))) ((= i j)) (display i))"))
+
+(assert-no-violations "do nested inside define passes when valid"
+  (check-source-termination
+    "(define (count-up n) (do ((i 0 (+ i 1))) ((= i n)) (display i)))"))
+
+;; ============================================================
+;; Test Group: Do-form analysis - trivially false test (#f)
+;; ============================================================
+(display "=== Do-form analysis: #f test ===") (newline)
+
+(let ((violations (check-source-termination
+                    "(do ((i 0 (+ i 1))) (#f) (display i))")))
+  (assert-violation-count "do with #f test flags infinite-loop" 1 violations)
+  (assert-equal "do #f test violation kind"
+    'infinite-loop
+    (termination-violation-kind (car violations)))
+  (assert-equal "do violation function is #f"
+    #f
+    (termination-violation-function (car violations))))
+
+;; ============================================================
+;; Test Group: Do-form analysis - no step expression
+;; ============================================================
+(display "=== Do-form analysis: no step ===") (newline)
+
+(let ((violations (check-source-termination
+                    "(do ((i 0)) ((= i 10)) (display i))")))
+  (assert-violation-count "do without step flags infinite-loop" 1 violations)
+  (assert-equal "do no-step violation kind"
+    'infinite-loop
+    (termination-violation-kind (car violations))))
+
+;; ============================================================
+;; Test Group: Do-form analysis - test doesn't reference loop var
+;; ============================================================
+(display "=== Do-form analysis: test ignores loop var ===") (newline)
+
+(let ((violations (check-source-termination
+                    "(do ((i 0 (+ i 1))) ((= x 10)) (display i))")))
+  (assert-violation-count "do test not referencing loop var flags" 1 violations)
+  (assert-equal "do test-no-ref violation kind"
+    'infinite-loop
+    (termination-violation-kind (car violations))))
+
+;; ============================================================
+;; Test Group: Do-form analysis - nested do-forms
+;; ============================================================
+(display "=== Do-form analysis: nested ===") (newline)
+
+(assert-no-violations "nested valid do-forms"
+  (check-source-termination
+    "(do ((i 0 (+ i 1))) ((= i 5)) (do ((j 0 (+ j 1))) ((= j 3)) (display j)))"))
+
+(let ((violations (check-source-termination
+                    "(do ((i 0 (+ i 1))) ((= i 5)) (do ((j 0)) ((= j 3)) (display j)))")))
+  (assert-violation-count "nested do: inner invalid flagged" 1 violations))
 
 ;; ============================================================
 ;; Results

@@ -137,7 +137,7 @@
   (check-source-termination
     "(let loop ((i 0)) (when (< i 10) (display i) (loop (+ i 1))))"))
 
-(assert-no-violations "mutual recursion (no violations yet)"
+(assert-no-violations "mutual recursion (valid even?/odd?)"
   (check-source-termination
     "(define (even? n) (if (= n 0) #t (odd? (- n 1)))) (define (odd? n) (if (= n 0) #f (even? (- n 1))))"))
 
@@ -839,10 +839,93 @@
   (check-source-termination
     "(define (apply-f f x) (f x))"))
 
-;; Mutual recursion should be skipped (Phase 6)
-(assert-no-violations "direct recursion: mutual recursion skipped"
+;; Mutual recursion handled by Phase 6 -- valid patterns should not produce violations here
+(assert-no-violations "direct recursion: mutual recursion handled by Phase 6"
   (check-source-termination
     "(define (even? n) (if (= n 0) #t (odd? (- n 1)))) (define (odd? n) (if (= n 0) #f (even? (- n 1))))"))
+
+;; ============================================================
+;; Test Group: Mutual recursion analysis - valid patterns (no violations)
+;; ============================================================
+(display "=== Mutual recursion analysis: valid ===") (newline)
+
+;; Issue #275 test 1: even?/odd? with (- n 1) and base cases
+(assert-no-violations "mutual recursion: even?/odd? with decrease and base case"
+  (check-source-termination
+    (string-append
+      "(define (my-even? n) (if (= n 0) #t (my-odd? (- n 1)))) "
+      "(define (my-odd? n) (if (= n 0) #f (my-even? (- n 1))))")))
+
+;; Three-function cycle all decreasing
+(assert-no-violations "mutual recursion: three-function cycle with decrease"
+  (check-source-termination
+    (string-append
+      "(define (a n) (if (= n 0) 'done (b (- n 1)))) "
+      "(define (b n) (if (= n 0) 'done (c (- n 1)))) "
+      "(define (c n) (if (= n 0) 'done (a (- n 1))))")))
+
+;; Both functions decrease on their respective calls
+(assert-no-violations "mutual recursion: both functions decrease before calling partner"
+  (check-source-termination
+    (string-append
+      "(define (ping n) (if (= n 0) 'done (pong (- n 1)))) "
+      "(define (pong n) (if (= n 0) 'done (ping (- n 1))))")))
+
+;; letrec-bound mutual recursion
+(assert-no-violations "mutual recursion: letrec-bound even/odd"
+  (check-source-termination
+    (string-append
+      "(letrec ((ev (lambda (n) (if (= n 0) #t (od (- n 1))))) "
+      "         (od (lambda (n) (if (= n 0) #f (ev (- n 1)))))) "
+      "  (ev 10))")))
+
+;; Structural decrease (cdr) in mutual recursion
+(assert-no-violations "mutual recursion: structural decrease with cdr"
+  (check-source-termination
+    (string-append
+      "(define (process-a lst) (if (null? lst) '() (process-b (cdr lst)))) "
+      "(define (process-b lst) (if (null? lst) '() (process-a (cdr lst))))")))
+
+;; ============================================================
+;; Test Group: Mutual recursion analysis - violations
+;; ============================================================
+(display "=== Mutual recursion analysis: violations ===") (newline)
+
+;; Issue #275 test 2: mutual recursion without decrease -- flag both
+(let ((violations (check-source-termination
+                    (string-append
+                      "(define (ping n) (pong n)) "
+                      "(define (pong n) (ping n))"))))
+  (assert-violation-count "mutual recursion: no decrease flags both" 2 violations)
+  (assert-equal "mutual recursion no-decrease kind (first)"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; Mutual recursion with decrease but no base case
+(let ((violations (check-source-termination
+                    (string-append
+                      "(define (down-a n) (down-b (- n 1))) "
+                      "(define (down-b n) (down-a (- n 1)))"))))
+  (assert-violation-count "mutual recursion: decrease but no base case flags both" 2 violations)
+  (assert-equal "mutual recursion no-base-case kind"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; Partial decrease: one decreases, other doesn't and doesn't receive decreased value
+;; Here ping decreases but pong passes n unchanged back (not the decreased value)
+(let ((violations (check-source-termination
+                    (string-append
+                      "(define (alpha n) (if (= n 0) 'done (beta n))) "
+                      "(define (beta n) (alpha n))"))))
+  (assert-violation-count "mutual recursion: no edge decreases flags both" 2 violations))
+
+;; Self-loop within multi-node SCC: f calls itself AND g (which calls f)
+;; The self-call doesn't decrease -- should flag the group
+(let ((violations (check-source-termination
+                    (string-append
+                      "(define (loop-a n) (loop-a n) (loop-b (- n 1))) "
+                      "(define (loop-b n) (if (= n 0) 'done (loop-a (- n 1))))"))))
+  (assert-violation-count "mutual recursion: self-loop without decrease in SCC" 2 violations))
 
 ;; ============================================================
 ;; Results

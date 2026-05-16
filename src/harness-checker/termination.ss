@@ -9,6 +9,10 @@
 ;;   verifying exit conditions and step expressions.
 ;; Phase 4 (named-let analysis): analyze named-let loops for termination by
 ;;   checking for decreasing arguments and base cases.
+;; Phase 5 (direct recursion): analyze directly recursive functions for
+;;   decreasing arguments and base cases using call graph SCCs.
+;; Phase 6 (mutual recursion): analyze mutually recursive function groups
+;;   (multi-node SCCs) for decreasing arguments across all call edges.
 
 (library (harness-checker termination)
   (export check-termination
@@ -29,7 +33,9 @@
           analyze-named-let-forms
           ;; Phase 5: direct recursion analysis
           analyze-direct-recursion
-          extract-formals)
+          extract-formals
+          ;; Phase 6: mutual recursion analysis
+          analyze-mutual-recursion)
   (import (rnrs))
 
   ;; Record type for termination violations.
@@ -855,6 +861,224 @@
       (reverse violations)))
 
   ;; ---------------------------------------------------------------
+  ;; Phase 6: Mutual recursion analysis
+  ;; ---------------------------------------------------------------
+
+  ;; Collect intra-SCC call expressions from body expressions.
+  ;; Returns a list of (callee-name arg-exprs...) for calls to SCC members.
+  ;; Includes self-calls (since self-edges within a multi-node SCC must also
+  ;; be verified as decreasing).
+  (define (collect-intra-scc-calls body-exprs scc-members)
+    (let ((calls '()))
+      (define (walk expr)
+        (when (pair? expr)
+          (unless (eq? (car expr) 'quote)
+            ;; If car is an SCC member name, record the full call
+            (when (and (symbol? (car expr))
+                       (memq (car expr) scc-members))
+              (set! calls (cons expr calls)))
+            ;; Walk car if compound
+            (when (pair? (car expr))
+              (walk (car expr)))
+            ;; Walk argument sub-expressions
+            (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+                      (cdr expr)))))
+      (for-each walk body-exprs)
+      calls))
+
+  ;; Check if a call expression has at least one strictly decreasing argument
+  ;; relative to the caller's formals. Checks each argument positionally and
+  ;; also checks if any argument is a decreasing expression of ANY formal.
+  (define (call-has-decreasing-arg? call-expr caller-formals)
+    (let ((args (cdr call-expr)))
+      (let check-args ((remaining-args args))
+        (if (null? remaining-args)
+            #f
+            (let check-formals ((formals caller-formals))
+              (cond
+                ((null? formals)
+                 (check-args (cdr remaining-args)))
+                ((decreasing-expr? (car remaining-args) (car formals))
+                 #t)
+                (else
+                 (check-formals (cdr formals)))))))))
+
+  ;; Check if at least one function in the SCC has a base case --
+  ;; a conditional branch that does not call ANY SCC member.
+  (define (scc-has-base-case? exprs scc-members)
+    (let ((found #f))
+      (define (contains-scc-call? expr)
+        (cond
+          ((symbol? expr) #f)
+          ((not (pair? expr)) #f)
+          ((eq? (car expr) 'quote) #f)
+          ((and (symbol? (car expr))
+                (memq (car expr) scc-members)) #t)
+          (else (or (contains-scc-call? (car expr))
+                    (contains-scc-call? (cdr expr))))))
+
+      (define (check-body body-exprs)
+        (define (walk expr)
+          (when (and (not found) (pair? expr))
+            (unless (eq? (car expr) 'quote)
+              (cond
+                ;; (if test consequent alternative)
+                ((eq? (car expr) 'if)
+                 (when (and (pair? (cdr expr)) (pair? (cddr expr)))
+                   (let ((test (cadr expr))
+                         (consequent (caddr expr))
+                         (alternative (if (pair? (cdddr expr)) (cadddr expr) #f)))
+                     (when (and (not (contains-scc-call? test))
+                                (or (not (contains-scc-call? consequent))
+                                    (and alternative
+                                         (not (contains-scc-call? alternative)))))
+                       (set! found #t))
+                     (walk consequent)
+                     (when alternative (walk alternative)))))
+
+                ;; (cond (test body...) ...)
+                ((eq? (car expr) 'cond)
+                 (for-each
+                   (lambda (clause)
+                     (when (and (pair? clause) (pair? (cdr clause)))
+                       (let ((body (cdr clause)))
+                         (when (not (contains-scc-call? body))
+                           (set! found #t))
+                         (for-each walk body))))
+                   (cdr expr)))
+
+                ;; (when test body...) -- if body contains a recursive call,
+                ;; the implicit else (when test is false) is a no-op base case
+                ((eq? (car expr) 'when)
+                 (when (pair? (cdr expr))
+                   (let ((body (cddr expr)))
+                     (when (contains-scc-call? body)
+                       (set! found #t)))))
+
+                ;; (unless test body...) -- if body contains a recursive call,
+                ;; the implicit else (when test is true) is a no-op base case
+                ((eq? (car expr) 'unless)
+                 (when (pair? (cdr expr))
+                   (let ((body (cddr expr)))
+                     (when (contains-scc-call? body)
+                       (set! found #t)))))
+
+                (else
+                 (when (pair? (car expr))
+                   (walk (car expr)))
+                 (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+                           (cdr expr)))))))
+        (for-each walk body-exprs))
+
+      ;; Check each function in the SCC for a base case
+      (let ((defs (extract-definitions exprs)))
+        (for-each
+          (lambda (member)
+            (unless found
+              (let ((entry (assq member defs)))
+                (when entry
+                  (check-body (cdr entry))))))
+          scc-members))
+      found))
+
+  ;; Analyze mutually recursive function groups for termination.
+  ;; For each multi-node SCC in the call graph:
+  ;;   - Check that every intra-SCC call edge passes a strictly decreasing argument
+  ;;   - Check that at least one function in the SCC has a base case
+  ;; If any call edge cannot be proven decreasing, flag all functions in the SCC.
+  (define (analyze-mutual-recursion exprs)
+    (let* ((graph (build-call-graph exprs))
+           (sccs (tarjan-scc graph))
+           (defs (extract-definitions exprs))
+           (violations '()))
+
+      (define (add-violation! kind func-name expr reason)
+        (set! violations
+          (cons (make-termination-violation kind func-name expr reason)
+                violations)))
+
+      ;; Process each multi-node SCC
+      (for-each
+        (lambda (scc)
+          (when (> (length scc) 1)
+            (let* ((scc-names scc)
+                   ;; Check if all intra-SCC call edges have a decreasing argument
+                   (all-edges-decrease
+                    (let check-members ((members scc-names))
+                      (if (null? members)
+                          #t
+                          (let* ((name (car members))
+                                 (formals (find-formals-for exprs name))
+                                 (body-entry (assq name defs))
+                                 (body (if body-entry (cdr body-entry) '()))
+                                 (intra-calls (collect-intra-scc-calls body scc-names)))
+                            (if (or (not formals)
+                                    (null? formals))
+                                ;; Can't extract formals -- conservative: fail
+                                #f
+                                (let check-calls ((calls intra-calls))
+                                  (cond
+                                    ((null? calls)
+                                     (check-members (cdr members)))
+                                    ((call-has-decreasing-arg? (car calls) formals)
+                                     (check-calls (cdr calls)))
+                                    (else #f)))))))))
+
+              (cond
+                ;; Not all edges decrease -- flag all functions
+                ((not all-edges-decrease)
+                 (let ((group-str (string-append "("
+                                    (apply string-append
+                                      (let build ((names (sort-symbols* scc-names)) (acc '()))
+                                        (if (null? names)
+                                            (reverse acc)
+                                            (build (cdr names)
+                                                   (cons (if (null? acc)
+                                                             (symbol->string (car names))
+                                                             (string-append ", " (symbol->string (car names))))
+                                                         acc)))))
+                                    ")")))
+                   (for-each
+                     (lambda (name)
+                       (add-violation! 'no-decreasing-arg name
+                         (or (find-definition-form exprs name)
+                             (list 'define name '...))
+                         (string-append "mutual recursion group " group-str
+                           " has no decreasing argument across all call edges")))
+                     scc-names)))
+
+                ;; All edges decrease but no base case in the group
+                ((not (scc-has-base-case? exprs scc-names))
+                 (let ((group-str (string-append "("
+                                    (apply string-append
+                                      (let build ((names (sort-symbols* scc-names)) (acc '()))
+                                        (if (null? names)
+                                            (reverse acc)
+                                            (build (cdr names)
+                                                   (cons (if (null? acc)
+                                                             (symbol->string (car names))
+                                                             (string-append ", " (symbol->string (car names))))
+                                                         acc)))))
+                                    ")")))
+                   (for-each
+                     (lambda (name)
+                       (add-violation! 'no-base-case name
+                         (or (find-definition-form exprs name)
+                             (list 'define name '...))
+                         (string-append "mutual recursion group " group-str
+                           " decreases but has no base case to stop recursion")))
+                     scc-names)))))))
+        sccs)
+
+      (reverse violations)))
+
+  ;; Helper: sort symbols for deterministic output in violation messages
+  (define (sort-symbols* syms)
+    (list-sort (lambda (a b)
+                 (string<? (symbol->string a) (symbol->string b)))
+               syms))
+
+  ;; ---------------------------------------------------------------
   ;; Main entry point
   ;; ---------------------------------------------------------------
 
@@ -863,5 +1087,6 @@
   (define (check-termination exprs type-env)
     (append (analyze-do-forms exprs)
             (analyze-named-let-forms exprs)
-            (analyze-direct-recursion exprs)))
+            (analyze-direct-recursion exprs)
+            (analyze-mutual-recursion exprs)))
 )

@@ -133,17 +133,13 @@
   (check-source-termination
     "(do ((i 0 (+ i 1))) ((= i 10) i) (display i))"))
 
-(assert-no-violations "named let loop (no violations yet)"
+(assert-no-violations "named let loop with decreasing arg and base case"
   (check-source-termination
     "(let loop ((i 0)) (when (< i 10) (display i) (loop (+ i 1))))"))
 
 (assert-no-violations "mutual recursion (no violations yet)"
   (check-source-termination
     "(define (even? n) (if (= n 0) #t (odd? (- n 1)))) (define (odd? n) (if (= n 0) #f (even? (- n 1))))"))
-
-(assert-no-violations "infinite loop pattern (no violations yet)"
-  (check-source-termination
-    "(let loop () (display \"forever\") (loop))"))
 
 (assert-true "result is a list"
   (list? (check-source-termination "(define (f x) x)")))
@@ -510,6 +506,230 @@
 (let ((violations (check-source-termination
                     "(do ((i 0 (+ i 1))) ((= i 5)) (do ((j 0)) ((= j 3)) (display j)))")))
   (assert-violation-count "nested do: inner invalid flagged" 1 violations))
+
+;; ============================================================
+;; Test Group: Named-let analysis - valid forms (no violations)
+;; ============================================================
+(display "=== Named-let analysis: valid ===") (newline)
+
+;; Issue #273 test 1: decreasing arg + base case
+(assert-no-violations "named-let with decreasing arg and base case"
+  (check-source-termination
+    "(let loop ((n 10)) (if (= n 0) 0 (loop (- n 1))))"))
+
+(assert-no-violations "named-let with sub1 decrease"
+  (check-source-termination
+    "(let loop ((n 10)) (if (zero? n) 0 (loop (sub1 n))))"))
+
+(assert-no-violations "named-let with fx- decrease"
+  (check-source-termination
+    "(let loop ((n 10)) (if (= n 0) 0 (loop (fx- n 1))))"))
+
+(assert-no-violations "named-let with cdr structural decrease"
+  (check-source-termination
+    "(let loop ((lst '(1 2 3))) (if (null? lst) 0 (loop (cdr lst))))"))
+
+(assert-no-violations "named-let with cddr structural decrease"
+  (check-source-termination
+    "(let loop ((lst '(1 2 3 4))) (if (null? lst) 0 (loop (cddr lst))))"))
+
+(assert-no-violations "named-let with list-tail structural decrease"
+  (check-source-termination
+    "(let loop ((lst '(1 2 3))) (if (null? lst) 0 (loop (list-tail lst 1))))"))
+
+(assert-no-violations "named-let with (not (pair? x)) base case"
+  (check-source-termination
+    "(let loop ((lst '(1 2 3))) (if (not (pair? lst)) 0 (loop (cdr lst))))"))
+
+(assert-no-violations "named-let with (< x 1) base case"
+  (check-source-termination
+    "(let loop ((n 10)) (if (< n 1) 0 (loop (- n 1))))"))
+
+(assert-no-violations "named-let with (<= x 0) base case"
+  (check-source-termination
+    "(let loop ((n 10)) (if (<= n 0) 0 (loop (- n 1))))"))
+
+(assert-no-violations "named-let with when guard (implicit base case)"
+  (check-source-termination
+    "(let loop ((n 10)) (when (> n 0) (display n) (loop (- n 1))))"))
+
+(assert-no-violations "named-let with unless guard"
+  (check-source-termination
+    "(let loop ((n 10)) (unless (= n 0) (display n) (loop (- n 1))))"))
+
+(assert-no-violations "named-let with cond guard"
+  (check-source-termination
+    "(let loop ((n 10)) (cond ((= n 0) 'done) (else (loop (- n 1)))))"))
+
+(assert-no-violations "named-let with multiple args, one decreasing"
+  (check-source-termination
+    "(let loop ((n 10) (acc 0)) (if (= n 0) acc (loop (- n 1) (+ acc n))))"))
+
+(assert-no-violations "named-let nested inside define"
+  (check-source-termination
+    "(define (sum-to n) (let loop ((i n) (acc 0)) (if (= i 0) acc (loop (- i 1) (+ acc i)))))"))
+
+;; ============================================================
+;; Test Group: Named-let analysis - no decreasing argument
+;; ============================================================
+(display "=== Named-let analysis: no decreasing arg ===") (newline)
+
+;; Issue #273 test 2: no decreasing arg
+(let ((violations (check-source-termination
+                    "(let loop ((n 10)) (loop n))")))
+  (assert-violation-count "named-let with no decreasing arg" 1 violations)
+  (assert-equal "named-let no-decrease kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations)))
+  (assert-equal "named-let no-decrease function is loop name"
+    'loop
+    (termination-violation-function (car violations))))
+
+(let ((violations (check-source-termination
+                    "(let loop ((n 10)) (if (= n 0) 0 (loop n)))")))
+  (assert-violation-count "named-let with base case but no decrease" 1 violations)
+  (assert-equal "named-let base-but-no-decrease kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; ============================================================
+;; Test Group: Named-let analysis - no base case
+;; ============================================================
+(display "=== Named-let analysis: no base case ===") (newline)
+
+;; Issue #273 test 3: decreasing but no base case
+(let ((violations (check-source-termination
+                    "(let loop ((n 10)) (loop (- n 1)))")))
+  (assert-violation-count "named-let with decrease but no base case" 1 violations)
+  (assert-equal "named-let no-base-case kind"
+    'no-base-case
+    (termination-violation-kind (car violations)))
+  (assert-equal "named-let no-base-case function is loop name"
+    'loop
+    (termination-violation-function (car violations))))
+
+(let ((violations (check-source-termination
+                    "(let loop ((lst '(1 2 3))) (display (car lst)) (loop (cdr lst)))")))
+  (assert-violation-count "named-let structural decrease but no base case" 1 violations)
+  (assert-equal "named-let structural no-base-case kind"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; ============================================================
+;; Test Group: Named-let analysis - infinite loop (no args)
+;; ============================================================
+(display "=== Named-let analysis: infinite loop ===") (newline)
+
+(let ((violations (check-source-termination
+                    "(let loop () (display \"forever\") (loop))")))
+  (assert-violation-count "named-let with no args is infinite" 1 violations)
+  (assert-equal "named-let no-args kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; ============================================================
+;; Test Group: Named-let analysis - nested named-lets
+;; ============================================================
+(display "=== Named-let analysis: nested ===") (newline)
+
+(assert-no-violations "nested valid named-lets"
+  (check-source-termination
+    "(let outer ((i 10)) (if (= i 0) 0 (let inner ((j 5)) (if (= j 0) (outer (- i 1)) (inner (- j 1))))))"))
+
+(let ((violations (check-source-termination
+                    "(let outer ((i 10)) (if (= i 0) 0 (let inner ((j 5)) (inner j))))")))
+  (assert-violation-count "nested: inner invalid, outer valid" 1 violations))
+
+;; ============================================================
+;; Test Group: Named-let analysis - non-recursive named-let (no violations)
+;; ============================================================
+(display "=== Named-let analysis: non-recursive ===") (newline)
+
+(assert-no-violations "named-let that doesn't recurse"
+  (check-source-termination
+    "(let loop ((x 1) (y 2)) (+ x y))"))
+
+;; ============================================================
+;; Test Group: Conservative fix 1 - no permissive if-alternative base case
+;; ============================================================
+(display "=== Conservative: if-alternative not counted as base case ===") (newline)
+
+;; An if with opaque test and non-recursive alternative should NOT count as base case
+(let ((violations (check-source-termination
+                    "(let loop ((n 10)) (if (some-check) (loop (- n 1)) 42))")))
+  (assert-violation-count "if with opaque test and non-recursive alt flagged" 1 violations)
+  (assert-equal "opaque if-alt violation kind"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; Verify that recognized base-case tests still work (consequent path)
+(assert-no-violations "if with recognized base-case test still passes"
+  (check-source-termination
+    "(let loop ((n 10)) (if (= n 0) 0 (loop (- n 1))))"))
+
+;; ============================================================
+;; Test Group: Conservative fix 2 - when/unless test must reference loop var
+;; ============================================================
+(display "=== Conservative: when/unless test must reference loop var ===") (newline)
+
+;; (when #t ...) should NOT count as having a base case
+(let ((violations (check-source-termination
+                    "(let loop ((n 10)) (when #t (loop (- n 1))))")))
+  (assert-violation-count "when #t with recursive body flagged" 1 violations)
+  (assert-equal "when #t violation kind"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; (when (some-opaque-check) ...) should NOT count as base case
+(let ((violations (check-source-termination
+                    "(let loop ((n 10)) (when (some-opaque-check) (loop (- n 1))))")))
+  (assert-violation-count "when with opaque test flagged" 1 violations)
+  (assert-equal "when opaque-test violation kind"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; (unless #f ...) should NOT count as having a base case
+(let ((violations (check-source-termination
+                    "(let loop ((n 10)) (unless #f (loop (- n 1))))")))
+  (assert-violation-count "unless #f with recursive body flagged" 1 violations)
+  (assert-equal "unless #f violation kind"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; Verify that when/unless with test referencing loop var still work
+(assert-no-violations "when with test referencing loop var still passes"
+  (check-source-termination
+    "(let loop ((n 10)) (when (> n 0) (display n) (loop (- n 1))))"))
+
+(assert-no-violations "unless with test referencing loop var still passes"
+  (check-source-termination
+    "(let loop ((n 10)) (unless (= n 0) (display n) (loop (- n 1))))"))
+
+;; ============================================================
+;; Test Group: Conservative fix 3 - all recursive calls must decrease
+;; ============================================================
+(display "=== Conservative: all calls must decrease ===") (newline)
+
+;; Mixed: one decreasing call + one non-decreasing call → should be flagged
+(let ((violations (check-source-termination
+                    "(let loop ((x 10)) (if (zero? x) 'done (begin (loop (- x 1)) (loop x))))")))
+  (assert-violation-count "mixed decreasing/non-decreasing calls flagged" 1 violations)
+  (assert-equal "mixed calls violation kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; All calls decrease → should pass
+(assert-no-violations "all calls decrease passes"
+  (check-source-termination
+    "(let loop ((x 10)) (if (zero? x) 'done (if (even? x) (loop (- x 1)) (loop (- x 2)))))"))
+
+;; Single non-decreasing call → should be flagged (same as before)
+(let ((violations (check-source-termination
+                    "(let loop ((n 10)) (if (= n 0) 0 (loop n)))")))
+  (assert-violation-count "single non-decreasing call still flagged" 1 violations)
+  (assert-equal "single non-decrease kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
 
 ;; ============================================================
 ;; Results

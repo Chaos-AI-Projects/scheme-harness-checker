@@ -26,7 +26,10 @@
           ;; Phase 3: do-form analysis
           analyze-do-forms
           ;; Phase 4: named-let analysis
-          analyze-named-let-forms)
+          analyze-named-let-forms
+          ;; Phase 5: direct recursion analysis
+          analyze-direct-recursion
+          extract-formals)
   (import (rnrs))
 
   ;; Record type for termination violations.
@@ -481,21 +484,21 @@
                 (pair? (cdr expr))
                 (memq (cadr expr) vars)
                 #t)
-           ;; (< var 1)
+           ;; (< var N) where N <= 2 (covers (< x 1) and (< x 2) for fibonacci-style)
            (and (eq? (car expr) '<)
                 (pair? (cdr expr))
                 (pair? (cddr expr))
                 (memq (cadr expr) vars)
                 (number? (caddr expr))
-                (<= (caddr expr) 1)
+                (<= (caddr expr) 2)
                 #t)
-           ;; (<= var 0)
+           ;; (<= var N) where N <= 1 (covers (<= x 0) and (<= x 1))
            (and (eq? (car expr) '<=)
                 (pair? (cdr expr))
                 (pair? (cddr expr))
                 (memq (cadr expr) vars)
                 (number? (caddr expr))
-                (<= (caddr expr) 0)
+                (<= (caddr expr) 1)
                 #t)
            ;; (null? var)
            (and (eq? (car expr) 'null?)
@@ -656,6 +659,201 @@
       (for-each walk exprs)
       (reverse violations)))
 
+  ;; Like has-decreasing-call? but only accepts strictly decreasing patterns
+  ;; (not monotonic/increasing). Used for direct recursion where increasing
+  ;; toward a base case is not a valid termination pattern.
+  (define (has-strictly-decreasing-call? body-exprs func-name vars)
+    (let ((found-any #f)
+          (all-decrease #t))
+      (define (walk expr)
+        (when (and all-decrease (pair? expr))
+          (unless (eq? (car expr) 'quote)
+            (when (eq? (car expr) func-name)
+              (set! found-any #t)
+              (let ((this-decreases #f))
+                (let check-args ((args (cdr expr)) (params vars))
+                  (when (and (pair? args) (pair? params))
+                    (when (decreasing-expr? (car args) (car params))
+                      (set! this-decreases #t))
+                    (check-args (cdr args) (cdr params))))
+                (unless this-decreases
+                  (set! all-decrease #f))))
+            (when (pair? (car expr))
+              (walk (car expr)))
+            (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+                      (cdr expr)))))
+      (for-each walk body-exprs)
+      (and found-any all-decrease)))
+
+  ;; ---------------------------------------------------------------
+  ;; Phase 5: Direct recursion analysis
+  ;; ---------------------------------------------------------------
+
+  ;; Extract formal parameter list from a definition form.
+  ;; Handles:
+  ;;   (define (name params...) body...)        -> (params...)
+  ;;   (define name (lambda (params...) body...)) -> (params...)
+  ;;   letrec/letrec* binding: (name (lambda (params...) body...)) -> (params...)
+  ;; Returns the parameter list or #f if it can't be extracted.
+  (define (extract-formals expr)
+    (cond
+      ;; (define (name . formals) body...) -- formals is cdr of (name . formals)
+      ((and (pair? expr)
+            (eq? (car expr) 'define)
+            (pair? (cdr expr))
+            (pair? (cadr expr))
+            (symbol? (caadr expr)))
+       (let ((formals (cdadr expr)))
+         (if (list? formals) formals #f)))
+
+      ;; (define name (lambda (formals...) body...))
+      ((and (pair? expr)
+            (eq? (car expr) 'define)
+            (pair? (cdr expr))
+            (symbol? (cadr expr))
+            (pair? (cddr expr))
+            (pair? (caddr expr))
+            (eq? (car (caddr expr)) 'lambda)
+            (pair? (cdr (caddr expr)))
+            (list? (cadr (caddr expr))))
+       (cadr (caddr expr)))
+
+      ;; letrec binding: (name (lambda (formals...) body...))
+      ((and (pair? expr)
+            (symbol? (car expr))
+            (pair? (cdr expr))
+            (pair? (cadr expr))
+            (eq? (car (cadr expr)) 'lambda)
+            (pair? (cdr (cadr expr)))
+            (list? (cadr (cadr expr))))
+       (cadr (cadr expr)))
+
+      (else #f)))
+
+  ;; Find the original definition form for a function name in the expression list.
+  ;; Used to attach the source form to violations.
+  (define (find-definition-form exprs name)
+    (let ((result #f))
+      (define (search expr)
+        (when (and (not result) (pair? expr))
+          (cond
+            ;; (define (name ...) ...)
+            ((and (eq? (car expr) 'define)
+                  (pair? (cdr expr))
+                  (pair? (cadr expr))
+                  (eq? (caadr expr) name))
+             (set! result expr))
+            ;; (define name (lambda ...))
+            ((and (eq? (car expr) 'define)
+                  (pair? (cdr expr))
+                  (eq? (cadr expr) name))
+             (set! result expr))
+            ;; letrec/letrec* bindings
+            ((and (memq (car expr) '(letrec letrec*))
+                  (pair? (cdr expr))
+                  (pair? (cadr expr)))
+             (for-each
+               (lambda (binding)
+                 (when (and (not result)
+                            (pair? binding)
+                            (eq? (car binding) name))
+                   (set! result expr)))
+               (cadr expr))
+             ;; Recurse into letrec body
+             (for-each search (cddr expr)))
+            (else
+             (for-each (lambda (sub) (when (pair? sub) (search sub)))
+                       (cdr expr))))))
+      (for-each search exprs)
+      result))
+
+  ;; Extract formals for a named function from the expression list.
+  ;; Walks expressions to find the definition and extract its formals.
+  (define (find-formals-for exprs name)
+    (let ((result #f))
+      (define (search expr)
+        (when (and (not result) (pair? expr))
+          (cond
+            ;; (define (name params...) body...)
+            ((and (eq? (car expr) 'define)
+                  (pair? (cdr expr))
+                  (pair? (cadr expr))
+                  (eq? (caadr expr) name))
+             (set! result (extract-formals expr)))
+            ;; (define name (lambda (params...) body...))
+            ((and (eq? (car expr) 'define)
+                  (pair? (cdr expr))
+                  (eq? (cadr expr) name)
+                  (pair? (cddr expr)))
+             (set! result (extract-formals expr)))
+            ;; letrec/letrec* bindings
+            ((and (memq (car expr) '(letrec letrec*))
+                  (pair? (cdr expr))
+                  (pair? (cadr expr)))
+             (for-each
+               (lambda (binding)
+                 (when (and (not result)
+                            (pair? binding)
+                            (eq? (car binding) name))
+                   (set! result (extract-formals binding))))
+               (cadr expr))
+             ;; Recurse into letrec body
+             (for-each search (cddr expr)))
+            (else
+             (for-each (lambda (sub) (when (pair? sub) (search sub)))
+                       (cdr expr))))))
+      (for-each search exprs)
+      result))
+
+  ;; Analyze directly recursive functions for termination.
+  ;; Uses call graph + SCC to identify direct recursion (single-node SCCs
+  ;; with a self-edge), then reuses has-decreasing-call? and has-base-case?
+  ;; from named-let analysis.
+  (define (analyze-direct-recursion exprs)
+    (let* ((graph (build-call-graph exprs))
+           (sccs (tarjan-scc graph))
+           (violations '()))
+
+      (define (add-violation! kind func-name expr reason)
+        (set! violations
+          (cons (make-termination-violation kind func-name expr reason)
+                violations)))
+
+      ;; Process each SCC
+      (for-each
+        (lambda (scc)
+          ;; Only handle direct recursion: single-node SCC with self-edge
+          (when (and (= (length scc) 1)
+                     (memq (car scc) (call-graph-edges graph (car scc))))
+            (let* ((name (car scc))
+                   (formals (find-formals-for exprs name))
+                   (def-entry (assq name graph))
+                   (body-entry (assq name (extract-definitions exprs)))
+                   (body (if body-entry (cdr body-entry) '()))
+                   (def-form (find-definition-form exprs name)))
+              ;; Only analyze if we could extract formals
+              (when formals
+                (cond
+                  ;; No formals or no strictly decreasing argument in any recursive call
+                  ((or (null? formals)
+                       (not (has-strictly-decreasing-call? body name formals)))
+                   (add-violation! 'no-decreasing-arg name
+                     (or def-form (list 'define name '...))
+                     (string-append "recursive function '"
+                       (symbol->string name)
+                       "' has no decreasing argument in recursive call(s)")))
+
+                  ;; Has decreasing args but no base case
+                  ((not (has-base-case? body name formals))
+                   (add-violation! 'no-base-case name
+                     (or def-form (list 'define name '...))
+                     (string-append "recursive function '"
+                       (symbol->string name)
+                       "' decreases but has no base case to stop recursion"))))))))
+        sccs)
+
+      (reverse violations)))
+
   ;; ---------------------------------------------------------------
   ;; Main entry point
   ;; ---------------------------------------------------------------
@@ -664,5 +862,6 @@
   ;; Analyzes expressions for potential non-termination.
   (define (check-termination exprs type-env)
     (append (analyze-do-forms exprs)
-            (analyze-named-let-forms exprs)))
+            (analyze-named-let-forms exprs)
+            (analyze-direct-recursion exprs)))
 )

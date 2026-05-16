@@ -125,7 +125,7 @@
 (assert-no-violations "define and call"
   (check-source-termination "(define (f x) (+ x 1)) (f 42)"))
 
-(assert-no-violations "recursive function (no violations yet)"
+(assert-no-violations "recursive function (terminating factorial)"
   (check-source-termination
     "(define (factorial n) (if (= n 0) 1 (* n (factorial (- n 1)))))"))
 
@@ -730,6 +730,119 @@
   (assert-equal "single non-decrease kind"
     'no-decreasing-arg
     (termination-violation-kind (car violations))))
+
+;; ============================================================
+;; Test Group: Direct recursion analysis - valid forms (no violations)
+;; ============================================================
+(display "=== Direct recursion analysis: valid ===") (newline)
+
+;; Issue #274 test 1: factorial with numeric decrease + base case
+(assert-no-violations "direct recursion: factorial passes"
+  (check-source-termination
+    "(define (fact n) (if (zero? n) 1 (* n (fact (- n 1)))))"))
+
+;; Issue #274 test 3: structural decrease with cdr
+(assert-no-violations "direct recursion: list length passes"
+  (check-source-termination
+    "(define (f xs) (if (null? xs) 0 (+ 1 (f (cdr xs)))))"))
+
+;; Issue #274 test 4: fibonacci with two recursive calls
+(assert-no-violations "direct recursion: fibonacci passes"
+  (check-source-termination
+    "(define (fib n) (if (< n 2) n (+ (fib (- n 1)) (fib (- n 2)))))"))
+
+;; Multi-arg: at least one arg decreases
+(assert-no-violations "direct recursion: multi-arg with one decreasing"
+  (check-source-termination
+    "(define (f x y) (if (null? x) y (f (cdr x) (+ y 1))))"))
+
+;; Non-recursive function should produce no violations
+(assert-no-violations "direct recursion: non-recursive function passes"
+  (check-source-termination
+    "(define (add x y) (+ x y))"))
+
+;; define-lambda form
+(assert-no-violations "direct recursion: define-lambda factorial passes"
+  (check-source-termination
+    "(define fact (lambda (n) (if (zero? n) 1 (* n (fact (- n 1))))))"))
+
+;; letrec-bound recursive function with decrease + base case
+(assert-no-violations "direct recursion: letrec with decrease + base passes"
+  (check-source-termination
+    "(letrec ((f (lambda (n) (if (zero? n) 0 (f (- n 1)))))) (f 10))"))
+
+;; sub1 decrease pattern
+(assert-no-violations "direct recursion: sub1 decrease passes"
+  (check-source-termination
+    "(define (count n) (if (zero? n) 0 (count (sub1 n))))"))
+
+;; cond-based base case
+(assert-no-violations "direct recursion: cond base case passes"
+  (check-source-termination
+    "(define (f n) (cond ((zero? n) 0) (else (f (- n 1)))))"))
+
+;; ============================================================
+;; Test Group: Direct recursion analysis - violations
+;; ============================================================
+(display "=== Direct recursion analysis: violations ===") (newline)
+
+;; Issue #274 test 2: no decrease, no base case
+(let ((violations (check-source-termination
+                    "(define (f n) (f n))")))
+  (assert-violation-count "direct recursion: no decrease no base" 1 violations)
+  (assert-equal "direct recursion no-decrease kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations)))
+  (assert-equal "direct recursion no-decrease function"
+    'f
+    (termination-violation-function (car violations))))
+
+;; Increasing argument (not decreasing)
+(let ((violations (check-source-termination
+                    "(define (f n) (if (zero? n) 0 (f (+ n 1))))")))
+  (assert-violation-count "direct recursion: increasing arg" 1 violations)
+  (assert-equal "direct recursion increasing-arg kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; Decrease but no base case
+(let ((violations (check-source-termination
+                    "(define (f n) (f (- n 1)))")))
+  (assert-violation-count "direct recursion: decrease but no base" 1 violations)
+  (assert-equal "direct recursion no-base kind"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; Base case exists but no decrease in recursive call
+(let ((violations (check-source-termination
+                    "(define (f n) (if (zero? n) 0 (f n)))")))
+  (assert-violation-count "direct recursion: base but no decrease" 1 violations)
+  (assert-equal "direct recursion base-no-decrease kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; letrec-bound with no decrease
+(let ((violations (check-source-termination
+                    "(letrec ((f (lambda (n) (f n)))) (f 10))")))
+  (assert-violation-count "direct recursion: letrec no decrease" 1 violations)
+  (assert-equal "direct recursion letrec no-decrease kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; ============================================================
+;; Test Group: Direct recursion analysis - conservative behavior
+;; ============================================================
+(display "=== Direct recursion analysis: conservative ===") (newline)
+
+;; Higher-order: function passed as argument -- should NOT be flagged
+(assert-no-violations "direct recursion: higher-order not flagged"
+  (check-source-termination
+    "(define (apply-f f x) (f x))"))
+
+;; Mutual recursion should be skipped (Phase 6)
+(assert-no-violations "direct recursion: mutual recursion skipped"
+  (check-source-termination
+    "(define (even? n) (if (= n 0) #t (odd? (- n 1)))) (define (odd? n) (if (= n 0) #f (even? (- n 1))))"))
 
 ;; ============================================================
 ;; Results

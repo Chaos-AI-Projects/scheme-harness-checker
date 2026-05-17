@@ -395,6 +395,118 @@
   (assert-no-errors "body inference no false positive" errors))
 
 ;; ===================================================================
+;; Test Group: Record Types
+;; ===================================================================
+(display "Test group: record types") (newline)
+
+;; --- Construction and predicates ---
+(let ((r (make-type-record '((name . #(base String)) (age . #(base Number)))
+                           '(name age))))
+  (assert-true "type-record? on record" (type-record? r))
+  (assert-true "type-record? false on base" (not (type-record? type:number)))
+  (assert-equal "record-fields length" 2 (length (type-record-fields r)))
+  (assert-equal "record-required" '(name age) (type-record-required r)))
+
+;; --- record-field-type ---
+(let ((r (make-type-record (list (cons 'x type:number) (cons 'y type:string))
+                           '(x))))
+  (assert-true "record-field-type existing field"
+    (type=? (record-field-type r 'x) type:number))
+  (assert-true "record-field-type second field"
+    (type=? (record-field-type r 'y) type:string))
+  (assert-equal "record-field-type missing field" #f (record-field-type r 'z)))
+
+;; --- type=? for records ---
+(let ((r1 (make-type-record (list (cons 'a type:number) (cons 'b type:string))
+                            '(a)))
+      (r2 (make-type-record (list (cons 'b type:string) (cons 'a type:number))
+                            '(a)))
+      (r3 (make-type-record (list (cons 'a type:number) (cons 'b type:string))
+                            '(a b))))
+  (assert-true "type=? records same fields different order" (type=? r1 r2))
+  (assert-true "type=? records different required" (not (type=? r1 r3))))
+
+;; --- Subtype: width subtyping ---
+(let ((wider (make-type-record
+               (list (cons 'x type:number) (cons 'y type:string) (cons 'z type:bool))
+               '(x y z)))
+      (narrower (make-type-record
+                  (list (cons 'x type:number) (cons 'y type:string))
+                  '(x y))))
+  (assert-true "wider record is subtype of narrower"
+    (subtype? wider narrower))
+  (assert-true "narrower record is NOT subtype of wider"
+    (not (subtype? narrower wider))))
+
+;; --- Subtype: covariant field types ---
+(let ((sub (make-type-record
+             (list (cons 'items (make-type-list type:number)))
+             '(items)))
+      (sup (make-type-record
+             (list (cons 'items (make-type-list type:any)))
+             '(items))))
+  (assert-true "record subtype with covariant field"
+    (subtype? sub sup))
+  (assert-true "record not subtype with contravariant field"
+    (not (subtype? sup sub))))
+
+;; --- Subtype: required field compatibility ---
+(let ((r-required (make-type-record
+                    (list (cons 'x type:number))
+                    '(x)))
+      (r-optional (make-type-record
+                    (list (cons 'x type:number))
+                    '())))
+  ;; A record where x is required is a subtype of one where x is optional
+  (assert-true "required field subtype of optional"
+    (subtype? r-required r-optional))
+  ;; But not vice versa: optional cannot satisfy required
+  (assert-true "optional field NOT subtype of required"
+    (not (subtype? r-optional r-required))))
+
+;; --- Record subtype of Any ---
+(let ((r (make-type-record (list (cons 'a type:number)) '(a))))
+  (assert-true "record subtype of Any" (subtype? r type:any)))
+
+;; --- type->string for records ---
+(let ((r (make-type-record (list (cons 'name type:string) (cons 'age type:number))
+                           '(name))))
+  (assert-equal "type->string record"
+    "(Record (name: String) (age?: Number))"
+    (type->string r)))
+
+;; --- parse-type-sexpr for records ---
+(let ((r (parse-type-sexpr '(Record ((name String) (age Number)) (name)))))
+  (assert-true "parse record type is record" (type-record? r))
+  (assert-true "parse record field name type"
+    (type=? (record-field-type r 'name) type:string))
+  (assert-true "parse record field age type"
+    (type=? (record-field-type r 'age) type:number))
+  (assert-equal "parse record required" '(name) (type-record-required r)))
+
+(let ((r (parse-type-sexpr '(Record ((items (List Number)))))))
+  (assert-true "parse record without required" (type-record? r))
+  (assert-equal "parse record empty required" '() (type-record-required r))
+  (assert-true "parse record nested type"
+    (type=? (record-field-type r 'items) (make-type-list type:number))))
+
+;; --- Union with records (point 4: keep as separate members) ---
+(let* ((r1 (make-type-record (list (cons 'x type:number)) '(x)))
+       (r2 (make-type-record (list (cons 'y type:string)) '(y)))
+       (u (simplify-union (list r1 r2))))
+  (assert-true "union of different records stays union"
+    (type-union? u))
+  (assert-equal "union of different records has 2 members"
+    2 (length (type-union-members u))))
+
+;; Identical records in union collapse
+(let* ((r1 (make-type-record (list (cons 'x type:number)) '(x)))
+       (r2 (make-type-record (list (cons 'x type:number)) '(x)))
+       (u (simplify-union (list r1 r2))))
+  (assert-true "union of identical records collapses"
+    (type-record? u)))
+
+;; ===================================================================
 ;; Summary
 ;; ===================================================================
 (newline)

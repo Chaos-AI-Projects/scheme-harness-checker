@@ -8,10 +8,11 @@
   (export ;; Type constructors
           make-type-base make-type-pair make-type-list make-type-vector
           make-type-fn make-type-fn-variadic make-type-union make-type-any
-          make-type-var
+          make-type-var make-type-record
           ;; Type predicates
           type-base? type-pair? type-list? type-vector?
           type-fn? type-fn-variadic? type-union? type-any? type-var?
+          type-record?
           ;; Type accessors
           type-base-name
           type-pair-car type-pair-cdr
@@ -22,6 +23,8 @@
           type-fn-variadic-min-arity
           type-union-members
           type-var-name
+          type-record-fields type-record-required
+          record-field-type
           ;; Operations
           subtype?
           type=?
@@ -32,7 +35,8 @@
           type:symbol type:void type:null type:any
           ;; Signature loading
           load-type-signatures
-          parse-type-signature)
+          parse-type-signature
+          parse-type-sexpr)
   (import (rnrs))
 
   ;; ---------------------------------------------------------------
@@ -92,6 +96,23 @@
   (define (type-var? t) (and (vector? t) (eq? (vector-ref t 0) 'tvar)))
   (define (type-var-name t) (vector-ref t 1))
 
+  ;; Record type: (Record ((field-name . field-type) ...) (required-field-names ...))
+  ;; Fields is an alist of (symbol . type), required is a list of symbols.
+  ;; Optionality is tracked via the required list, not encoded in field types.
+  (define make-type-record
+    (case-lambda
+      ((fields) (vector 'record fields '()))
+      ((fields required) (vector 'record fields required))))
+  (define (type-record? t) (and (vector? t) (eq? (vector-ref t 0) 'record)))
+  (define (type-record-fields t) (vector-ref t 1))
+  (define (type-record-required t) (vector-ref t 2))
+
+  ;; Look up a field's type in a record type. Returns the field type,
+  ;; or #f if the field does not exist in the record.
+  (define (record-field-type rec field-name)
+    (let ((match (assq field-name (type-record-fields rec))))
+      (and match (cdr match))))
+
   ;; ---------------------------------------------------------------
   ;; Well-known type constants
   ;; ---------------------------------------------------------------
@@ -128,6 +149,20 @@
       ((and (type-fn-variadic? a) (type-fn-variadic? b))
        (and (type=? (type-fn-variadic-param a) (type-fn-variadic-param b))
             (type=? (type-fn-variadic-return a) (type-fn-variadic-return b))))
+      ((and (type-record? a) (type-record? b))
+       (let ((fa (type-record-fields a))
+             (fb (type-record-fields b))
+             (ra (type-record-required a))
+             (rb (type-record-required b)))
+         (and (= (length fa) (length fb))
+              (= (length ra) (length rb))
+              ;; Same required fields (order-independent)
+              (for-all (lambda (r) (memq r rb)) ra)
+              ;; Same fields with equal types (order-independent)
+              (for-all (lambda (pair-a)
+                         (let ((match (assq (car pair-a) fb)))
+                           (and match (type=? (cdr pair-a) (cdr match)))))
+                       fa))))
       ((and (type-union? a) (type-union? b))
        (let ((ma (type-union-members a))
              (mb (type-union-members b)))
@@ -165,6 +200,23 @@
       ;; LLM-generated code — we prefer fewer false positives over soundness)
       ((and (type-vector? a) (type-vector? b))
        (subtype? (type-vector-elem a) (type-vector-elem b)))
+      ;; Record structural subtyping (width + covariant depth):
+      ;; A record with more fields is a subtype of one with fewer fields,
+      ;; provided all fields of the supertype exist in the subtype with
+      ;; covariant field types, and all required fields of the supertype
+      ;; are required in the subtype.
+      ((and (type-record? a) (type-record? b))
+       (let ((fa (type-record-fields a))
+             (fb (type-record-fields b))
+             (ra (type-record-required a))
+             (rb (type-record-required b)))
+         (and ;; Every field in b must exist in a with a subtype
+              (for-all (lambda (pair-b)
+                         (let ((match (assq (car pair-b) fa)))
+                           (and match (subtype? (cdr match) (cdr pair-b)))))
+                       fb)
+              ;; Every required field in b must be required in a
+              (for-all (lambda (r) (and (memq r ra) #t)) rb))))
       ;; A type is a subtype of a union if it's a subtype of any member
       ((type-union? b)
        (exists (lambda (m) (subtype? a m)) (type-union-members b)))
@@ -228,6 +280,18 @@
       ((type-fn-variadic? t)
        (string-append "(->* " (type->string (type-fn-variadic-param t))
                       " " (type->string (type-fn-variadic-return t)) ")"))
+      ((type-record? t)
+       (let ((fields (type-record-fields t))
+             (req (type-record-required t)))
+         (string-append
+          "(Record"
+          (fold-left (lambda (acc f)
+                       (string-append acc " ("
+                                      (symbol->string (car f))
+                                      (if (memq (car f) req) "" "?")
+                                      ": " (type->string (cdr f)) ")"))
+                     "" fields)
+          ")")))
       ((type-union? t)
        (string-append "(U "
                       (fold-left (lambda (acc m)
@@ -280,6 +344,17 @@
                                    (parse-type-sexpr (caddr sexpr))))
            ((U)
             (make-type-union (map parse-type-sexpr (cdr sexpr))))
+           ((Record)
+            ;; (Record ((field-name type) ...) [required-fields])
+            ;; or (Record ((field-name type) ...))
+            (let* ((parts (cdr sexpr))
+                   (field-specs (car parts))
+                   (required (if (null? (cdr parts)) '() (cadr parts)))
+                   (fields (map (lambda (spec)
+                                  (cons (car spec)
+                                        (parse-type-sexpr (cadr spec))))
+                                field-specs)))
+              (make-type-record fields required)))
            (else type:any))))
       (else type:any)))
 

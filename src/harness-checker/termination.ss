@@ -341,7 +341,7 @@
               ((and (pair? termination)
                     (eq? (car termination) #f))
                (add-violation! do-expr
-                 "do-form test is always false (#f)"))
+                 "do-form has unreachable exit condition"))
 
               ;; No step expressions -- loop variables never change
               ((and (not (null? vars)) (not has-any-step?))
@@ -354,7 +354,7 @@
                     has-any-step?
                     (not (expr-references-any? (car termination) vars)))
                (add-violation! do-expr
-                 "do-form test does not reference any loop variable"))))))
+                 "do-form exit test does not reference any loop variable"))))))
 
       (for-each walk exprs)
       (reverse violations)))
@@ -479,38 +479,47 @@
   (define (base-case-test? expr vars)
     (and (pair? expr)
          (or
-           ;; (= var 0) or (= 0 var)
+           ;; (= var <expr>) or (= <expr> var) where var is a loop variable
+           ;; and the other operand is not itself a loop variable (i.e., it's a fixed bound)
            (and (eq? (car expr) '=)
                 (pair? (cdr expr))
                 (pair? (cddr expr))
-                (or (and (memq (cadr expr) vars) (eqv? (caddr expr) 0))
-                    (and (eqv? (cadr expr) 0) (memq (caddr expr) vars))))
+                (or (and (memq (cadr expr) vars)
+                         (not (memq (caddr expr) vars)))
+                    (and (not (memq (cadr expr) vars))
+                         (memq (caddr expr) vars))))
            ;; (zero? var)
            (and (eq? (car expr) 'zero?)
                 (pair? (cdr expr))
-                (memq (cadr expr) vars)
-                #t)
-           ;; (< var N) where N <= 2 (covers (< x 1) and (< x 2) for fibonacci-style)
+                (and (memq (cadr expr) vars) #t))
+           ;; (< var N) where N is a number or a non-loop-variable
            (and (eq? (car expr) '<)
                 (pair? (cdr expr))
                 (pair? (cddr expr))
                 (memq (cadr expr) vars)
-                (number? (caddr expr))
-                (<= (caddr expr) 2)
-                #t)
-           ;; (<= var N) where N <= 1 (covers (<= x 0) and (<= x 1))
+                (not (memq (caddr expr) vars)))
+           ;; (> N var) or (> <expr> var) where var is a loop variable
+           (and (eq? (car expr) '>)
+                (pair? (cdr expr))
+                (pair? (cddr expr))
+                (memq (caddr expr) vars)
+                (not (memq (cadr expr) vars)))
+           ;; (<= var N) where N is not a loop variable
            (and (eq? (car expr) '<=)
                 (pair? (cdr expr))
                 (pair? (cddr expr))
                 (memq (cadr expr) vars)
-                (number? (caddr expr))
-                (<= (caddr expr) 1)
-                #t)
+                (not (memq (caddr expr) vars)))
+           ;; (>= N var) where var is a loop variable
+           (and (eq? (car expr) '>=)
+                (pair? (cdr expr))
+                (pair? (cddr expr))
+                (memq (caddr expr) vars)
+                (not (memq (cadr expr) vars)))
            ;; (null? var)
            (and (eq? (car expr) 'null?)
                 (pair? (cdr expr))
-                (memq (cadr expr) vars)
-                #t)
+                (and (memq (cadr expr) vars) #t))
            ;; (not (pair? var))
            (and (eq? (car expr) 'not)
                 (pair? (cdr expr))
@@ -653,14 +662,14 @@
               ((or (null? vars)
                    (not (has-decreasing-call? body loop-name vars)))
                (add-violation! 'no-decreasing-arg loop-name expr
-                 (string-append "named-let '" (symbol->string loop-name)
-                   "' has no decreasing argument in recursive call(s)")))
+                 (string-append "named-let \"" (symbol->string loop-name)
+                   "\" has no decreasing argument in recursive call(s)")))
 
               ;; Has decreasing args but no base case
               ((not (has-base-case? body loop-name vars))
                (add-violation! 'no-base-case loop-name expr
-                 (string-append "named-let '" (symbol->string loop-name)
-                   "' decreases but has no base case to stop recursion")))))))
+                 (string-append "named-let \"" (symbol->string loop-name)
+                   "\" has no reachable base case")))))))
 
       (for-each walk exprs)
       (reverse violations)))
@@ -845,17 +854,17 @@
                        (not (has-strictly-decreasing-call? body name formals)))
                    (add-violation! 'no-decreasing-arg name
                      (or def-form (list 'define name '...))
-                     (string-append "recursive function '"
+                     (string-append "recursive function \""
                        (symbol->string name)
-                       "' has no decreasing argument in recursive call(s)")))
+                       "\" has no decreasing argument in recursive call(s)")))
 
                   ;; Has decreasing args but no base case
                   ((not (has-base-case? body name formals))
                    (add-violation! 'no-base-case name
                      (or def-form (list 'define name '...))
-                     (string-append "recursive function '"
+                     (string-append "recursive function \""
                        (symbol->string name)
-                       "' decreases but has no base case to stop recursion"))))))))
+                       "\" has no reachable base case"))))))))
         sccs)
 
       (reverse violations)))
@@ -903,6 +912,18 @@
                 (else
                  (check-formals (cdr formals)))))))))
 
+  ;; Check if a test expression references any formal parameter of the SCC functions.
+  ;; Used to ensure when/unless guards depend on changing state (not constant tests).
+  (define (scc-test-references-param? test exprs scc-members)
+    (let ((all-formals
+           (let collect ((members scc-members) (acc '()))
+             (if (null? members)
+                 acc
+                 (let ((formals (find-formals-for exprs (car members))))
+                   (collect (cdr members)
+                            (if formals (append formals acc) acc)))))))
+      (expr-references-any? test all-formals)))
+
   ;; Check if at least one function in the SCC has a base case --
   ;; a conditional branch that does not call ANY SCC member.
   (define (scc-has-base-case? exprs scc-members)
@@ -948,20 +969,31 @@
                    (cdr expr)))
 
                 ;; (when test body...) -- if body contains a recursive call,
-                ;; the implicit else (when test is false) is a no-op base case
+                ;; the implicit else (when test is false) is a no-op base case.
+                ;; Conservative: test must reference a function parameter to ensure
+                ;; the implicit base-case path is reachable (not a constant like #t).
                 ((eq? (car expr) 'when)
                  (when (pair? (cdr expr))
-                   (let ((body (cddr expr)))
-                     (when (contains-scc-call? body)
-                       (set! found #t)))))
+                   (let ((test (cadr expr))
+                         (body (cddr expr)))
+                     (when (and (contains-scc-call? body)
+                                (not (contains-scc-call? test))
+                                (scc-test-references-param? test exprs scc-members))
+                       (set! found #t))
+                     (for-each walk body))))
 
                 ;; (unless test body...) -- if body contains a recursive call,
-                ;; the implicit else (when test is true) is a no-op base case
+                ;; the implicit else (when test is true) is a no-op base case.
+                ;; Conservative: test must reference a function parameter.
                 ((eq? (car expr) 'unless)
                  (when (pair? (cdr expr))
-                   (let ((body (cddr expr)))
-                     (when (contains-scc-call? body)
-                       (set! found #t)))))
+                   (let ((test (cadr expr))
+                         (body (cddr expr)))
+                     (when (and (contains-scc-call? body)
+                                (not (contains-scc-call? test))
+                                (scc-test-references-param? test exprs scc-members))
+                       (set! found #t))
+                     (for-each walk body))))
 
                 (else
                  (when (pair? (car expr))
@@ -1044,7 +1076,7 @@
                          (or (find-definition-form exprs name)
                              (list 'define name '...))
                          (string-append "mutual recursion group " group-str
-                           " has no decreasing argument across all call edges")))
+                           " has no decreasing argument across call edges")))
                      scc-names)))
 
                 ;; All edges decrease but no base case in the group
@@ -1066,7 +1098,7 @@
                          (or (find-definition-form exprs name)
                              (list 'define name '...))
                          (string-append "mutual recursion group " group-str
-                           " decreases but has no base case to stop recursion")))
+                           " has no reachable base case")))
                      scc-names)))))))
         sccs)
 
@@ -1082,11 +1114,26 @@
   ;; Main entry point
   ;; ---------------------------------------------------------------
 
-  ;; check-termination : (list-of expr) x type-env -> (list-of termination-violation)
+  ;; check-termination : (list-of expr) x type-env [x max-definitions] -> (list-of termination-violation)
   ;; Analyzes expressions for potential non-termination.
-  (define (check-termination exprs type-env)
-    (append (analyze-do-forms exprs)
-            (analyze-named-let-forms exprs)
-            (analyze-direct-recursion exprs)
-            (analyze-mutual-recursion exprs)))
+  ;; Optional max-definitions parameter: when set, skip call-graph-based analysis
+  ;; (direct recursion, mutual recursion) if the program has more definitions than this limit.
+  ;; A value of 0 disables call-graph analysis entirely. #f means no limit (default).
+  (define check-termination
+    (case-lambda
+      ((exprs type-env)
+       (check-termination exprs type-env #f))
+      ((exprs type-env max-definitions)
+       (let ((do-violations (analyze-do-forms exprs))
+             (named-let-violations (analyze-named-let-forms exprs)))
+         (if (and max-definitions
+                  (let ((defs (extract-definitions exprs)))
+                    (> (length defs) max-definitions)))
+             ;; Skip call-graph analysis when over the depth limit
+             (append do-violations named-let-violations)
+             ;; Full analysis
+             (append do-violations
+                     named-let-violations
+                     (analyze-direct-recursion exprs)
+                     (analyze-mutual-recursion exprs)))))))
 )

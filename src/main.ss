@@ -2,10 +2,11 @@
 ;; CLI entry point for the whitelist checker, type checker, and termination analysis.
 ;;
 ;; Usage:
-;;   scheme --libdirs src:<packrat-extended-path> --program src/main.ss [--termination] <source-file> <whitelist-file> [<type-signatures-file>]
+;;   scheme --libdirs src:<packrat-extended-path> --program src/main.ss [--no-termination] [--termination-depth N] <source-file> <whitelist-file> [<type-signatures-file>]
 ;;
 ;; Flags:
-;;   --termination  Enable termination analysis pass (disabled by default)
+;;   --no-termination       Disable termination analysis pass (enabled by default)
+;;   --termination-depth N  Skip call-graph analysis if program has more than N definitions
 ;;
 ;; Exit code 0 if no violations, 1 if violations found.
 
@@ -16,7 +17,12 @@
         (harness-checker type-infer)
         (harness-checker termination))
 
+;; Flags that consume the next argument as their value
+(define flags-with-value '("--termination-depth"))
+
 ;; Extract --flags from args, returning (flags . positional-args)
+;; Flags listed in flags-with-value consume the following argument as a value,
+;; stored as (flag . value) in the flags list.
 (define (parse-flags args)
   (let loop ((remaining (cdr args))  ;; skip program name
              (flags '())
@@ -28,21 +34,52 @@
             (> (string-length (car remaining)) 2)
             (char=? (string-ref (car remaining) 0) #\-)
             (char=? (string-ref (car remaining) 1) #\-))
-       (loop (cdr remaining)
-             (cons (car remaining) flags)
-             positional))
+       (if (and (member (car remaining) flags-with-value)
+                (pair? (cdr remaining)))
+           ;; Flag with value: consume next arg
+           (loop (cddr remaining)
+                 (cons (cons (car remaining) (cadr remaining)) flags)
+                 positional)
+           ;; Boolean flag
+           (loop (cdr remaining)
+                 (cons (car remaining) flags)
+                 positional)))
       (else
        (loop (cdr remaining)
              flags
              (cons (car remaining) positional))))))
 
+;; Look up a flag-with-value from the parsed flags list.
+;; Returns the string value or #f if not present.
+(define (get-flag-value flags flag-name)
+  (let loop ((remaining flags))
+    (cond
+      ((null? remaining) #f)
+      ((and (pair? (car remaining))
+            (string=? (caar remaining) flag-name))
+       (cdar remaining))
+      (else (loop (cdr remaining))))))
+
+;; Check if a boolean flag is present in the flags list.
+(define (has-flag? flags flag-name)
+  (let loop ((remaining flags))
+    (cond
+      ((null? remaining) #f)
+      ((and (string? (car remaining))
+            (string=? (car remaining) flag-name)) #t)
+      (else (loop (cdr remaining))))))
+
 (define (main args)
   (let* ((parsed (parse-flags args))
          (flags (car parsed))
          (positional (cdr parsed))
-         (termination-enabled? (member "--termination" flags)))
+         (termination-enabled? (not (has-flag? flags "--no-termination")))
+         (termination-depth-str (get-flag-value flags "--termination-depth"))
+         (termination-depth (if termination-depth-str
+                                (string->number termination-depth-str)
+                                #f)))
     (when (< (length positional) 2)
-      (display "Usage: scheme --libdirs src --program src/main.ss [--termination] <source-file> <whitelist-file> [<type-signatures-file>]")
+      (display "Usage: scheme --libdirs src --program src/main.ss [--no-termination] [--termination-depth N] <source-file> <whitelist-file> [<type-signatures-file>]")
       (newline)
       (exit 1))
     (let* ((source-path (car positional))
@@ -144,7 +181,9 @@
       ;; Run termination analysis if enabled
       (let ((term-violations '()))
         (when termination-enabled?
-          (let ((tv (check-termination exprs signatures)))
+          (let ((tv (if termination-depth
+                        (check-termination exprs signatures termination-depth)
+                        (check-termination exprs signatures))))
             (set! term-violations tv)))
 
         ;; Report termination violations
@@ -152,15 +191,12 @@
           (display "TERMINATION VIOLATIONS:") (newline)
           (for-each
            (lambda (v)
-             (display "  - ")
+             (display "    - ")
              (display (termination-violation-kind v))
-             (when (termination-violation-function v)
-               (display " in ")
-               (display (termination-violation-function v)))
              (display ": ")
              (display (termination-violation-reason v))
              (newline)
-             (display "      at: ")
+             (display "        at: ")
              (write (termination-violation-expr v))
              (newline))
            term-violations))

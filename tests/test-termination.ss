@@ -928,6 +928,126 @@
   (assert-violation-count "mutual recursion: self-loop without decrease in SCC" 2 violations))
 
 ;; ============================================================
+;; Test Group: Integration and edge cases (Phase 7)
+;; ============================================================
+(display "=== Integration and edge cases ===") (newline)
+
+;; 1a. Non-recursive programs produce no violations
+(assert-no-violations "non-recursive: plain defines and lambdas"
+  (check-source-termination
+    "(define (add x y) (+ x y)) (define (greet name) (string-append \"Hello \" name))"))
+
+(assert-no-violations "non-recursive: higher-order functions"
+  (check-source-termination
+    "(define (apply-twice f x) (f (f x))) (apply-twice add1 5)"))
+
+(assert-no-violations "non-recursive: let/let* without recursion"
+  (check-source-termination
+    "(let ((x 1) (y 2)) (+ x y))"))
+
+(assert-no-violations "non-recursive: nested lambdas"
+  (check-source-termination
+    "(define (make-adder n) (lambda (x) (+ x n)))"))
+
+;; 1b. Multiple violations in one program
+(let ((violations (check-source-termination
+                    (string-append
+                      "(do ((i 0 (+ i 1))) (#f) (display i)) "
+                      "(let loop () (loop)) "
+                      "(define (f n) (f n))"))))
+  (assert-violation-count "multiple violations: 3 different kinds" 3 violations))
+
+;; 1c. Mix of safe loops and unsafe recursion -- only unsafe flagged
+(let ((violations (check-source-termination
+                    (string-append
+                      ;; Safe: named-let with decrease and base case
+                      "(define (countdown n) (let loop ((i n)) (if (= i 0) 'done (loop (- i 1))))) "
+                      ;; Unsafe: direct recursion with no decrease
+                      "(define (spin n) (spin n))"))))
+  (assert-violation-count "mixed safe/unsafe: only unsafe flagged" 1 violations)
+  (assert-equal "mixed safe/unsafe: violation is for 'spin'"
+    'spin
+    (termination-violation-function (car violations))))
+
+;; 1d. Nested recursion -- recursive function inside a let inside another recursive function
+(let ((violations (check-source-termination
+                    (string-append
+                      "(define (outer n) "
+                      "  (let ((inner (lambda (m) (if (= m 0) 'done (inner (- m 1)))))) "
+                      "    (if (= n 0) 'base (outer (- n 1)))))"))))
+  ;; outer is safe (has base case and decreasing arg)
+  ;; inner: lambda named 'inner' -- depends on whether letrec binding is detected
+  ;; At minimum, outer should not be flagged
+  (let ((outer-violations (filter (lambda (v) (eq? (termination-violation-function v) 'outer))
+                                  violations)))
+    (assert-no-violations "nested recursion: outer is safe" outer-violations)))
+
+;; 1e. Zero false positives on sample-safe.ss patterns (fibonacci and factorial)
+(assert-no-violations "sample-safe: fibonacci via named-let"
+  (check-source-termination
+    (string-append
+      "(define (fibonacci n) "
+      "  (let loop ((i 0) (a 0) (b 1)) "
+      "    (if (= i n) a (loop (+ i 1) b (+ a b)))))")))
+
+(assert-no-violations "sample-safe: factorial via letrec"
+  (check-source-termination
+    (string-append
+      "(define (factorial n) "
+      "  (letrec ((fact (lambda (n acc) "
+      "                   (if (zero? n) acc (fact (- n 1) (* acc n)))))) "
+      "    (fact n 1)))")))
+
+;; 1f. Correctly flags known infinite loops
+(let ((violations (check-source-termination
+                    "(do ((i 0 (+ i 1))) (#f) (display i))")))
+  (assert-violation-count "infinite do-loop: always-false test" 1 violations)
+  (assert-equal "infinite do-loop kind"
+    'infinite-loop
+    (termination-violation-kind (car violations))))
+
+(let ((violations (check-source-termination
+                    "(define (f n) (f n))")))
+  (assert-violation-count "no-decrease direct recursion" 1 violations)
+  (assert-equal "no-decrease kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+(let ((violations (check-source-termination
+                    "(let loop () (loop))")))
+  (assert-violation-count "named-let with no args always flags" 1 violations)
+  (assert-equal "named-let no-args kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; 1g. Recursion on decreasing list (tool-call use case)
+(assert-no-violations "list recursion: cdr with null? base case"
+  (check-source-termination
+    (string-append
+      "(define (process-records records) "
+      "  (if (null? records) '() "
+      "    (begin (car records) (process-records (cdr records)))))")))
+
+;; ============================================================
+;; Test Group: Depth limit (Phase 7)
+;; ============================================================
+(display "=== Depth limit ===") (newline)
+
+;; check-termination with depth limit of 0 should skip call-graph analysis
+;; (only do-form and named-let checks run)
+(let ((violations (check-termination
+                    (read-all-expressions "(define (f n) (f n))")
+                    '()
+                    0)))  ;; depth-limit = 0 skips call-graph phases
+  (assert-no-violations "depth-limit 0: skips direct recursion check" violations))
+
+;; With no depth limit (default), direct recursion is caught
+(let ((violations (check-termination
+                    (read-all-expressions "(define (f n) (f n))")
+                    '())))
+  (assert-violation-count "no depth-limit: catches direct recursion" 1 violations))
+
+;; ============================================================
 ;; Results
 ;; ============================================================
 (newline)

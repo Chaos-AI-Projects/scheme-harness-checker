@@ -5,7 +5,8 @@
 
 (import (rnrs)
         (harness-checker termination)
-        (harness-checker whitelist-checker))
+        (harness-checker whitelist-checker)
+        (harness-checker types))
 
 (define pass-count 0)
 (define fail-count 0)
@@ -1046,6 +1047,279 @@
                     (read-all-expressions "(define (f n) (f n))")
                     '())))
   (assert-violation-count "no depth-limit: catches direct recursion" 1 violations))
+
+;; ============================================================
+;; Test Group: Collection HOF whitelist
+;; ============================================================
+(display "=== Collection HOF whitelist ===") (newline)
+
+;; collection-hof? recognizes standard HOFs
+(assert-true "collection-hof? recognizes map"
+  (collection-hof? 'map))
+(assert-true "collection-hof? recognizes fold-left"
+  (collection-hof? 'fold-left))
+(assert-true "collection-hof? recognizes filter"
+  (collection-hof? 'filter))
+(assert-true "collection-hof? recognizes for-each"
+  (collection-hof? 'for-each))
+(assert-true "collection-hof? recognizes vector-map"
+  (collection-hof? 'vector-map))
+
+;; collection-hof? rejects non-HOFs
+(assert-equal "collection-hof? rejects unknown"
+  #f
+  (collection-hof? 'my-custom-map))
+(assert-equal "collection-hof? rejects car"
+  #f
+  (collection-hof? 'car))
+
+;; HOF calls do not generate call graph edges.
+;; Note: (map helper lst) — 'helper' is in argument position, not call position,
+;; so it correctly does not appear as a call graph edge. This is a known
+;; limitation: callback functions passed to HOFs are not tracked as calls.
+(let ((graph (source->call-graph
+               (string-append
+                 "(define (process lst) (map helper lst)) "
+                 "(define (helper x) (+ x 1))"))))
+  (assert-equal "process has no call edges (helper is in arg position)"
+    '()
+    (call-graph-edges graph 'process)))
+
+;; When helper is directly called, it appears as an edge
+(let ((graph (source->call-graph
+               (string-append
+                 "(define (process lst) (helper (car lst))) "
+                 "(define (helper x) (+ x 1))"))))
+  (assert-true "process calls helper (direct call)"
+    (list-contains? (call-graph-edges graph 'process) 'helper)))
+
+;; User-defined function named 'map' that collides with HOF whitelist:
+;; Since collect-calls-in-body filters by HOF name AND target-names,
+;; a user-defined 'map' would be excluded from call graph edges.
+;; This is the documented known limitation for HOF callback tracking.
+
+;; ============================================================
+;; Test Group: HOF whitelist - termination check (positive)
+;; ============================================================
+(display "=== HOF whitelist: no violations ===") (newline)
+
+;; Direct calls to whitelisted HOFs should not trigger termination warnings
+(assert-no-violations "map call does not trigger warning"
+  (check-source-termination "(define (f lst) (map car lst))"))
+
+(assert-no-violations "fold-left call does not trigger warning"
+  (check-source-termination "(define (sum lst) (fold-left + 0 lst))"))
+
+(assert-no-violations "filter call does not trigger warning"
+  (check-source-termination "(define (evens lst) (filter even? lst))"))
+
+(assert-no-violations "for-each call does not trigger warning"
+  (check-source-termination "(define (print-all lst) (for-each display lst))"))
+
+(assert-no-violations "find call does not trigger warning"
+  (check-source-termination "(define (first-even lst) (find even? lst))"))
+
+(assert-no-violations "exists call does not trigger warning"
+  (check-source-termination "(define (has-zero? lst) (exists zero? lst))"))
+
+(assert-no-violations "vector-map call does not trigger warning"
+  (check-source-termination "(define (inc-vec v) (vector-map add1 v))"))
+
+(assert-no-violations "nested HOF calls do not trigger warning"
+  (check-source-termination
+    "(define (process lst) (map car (filter pair? lst)))"))
+
+;; HOF used inside recursive function that is itself terminating
+(assert-no-violations "HOF inside terminating recursive function"
+  (check-source-termination
+    (string-append
+      "(define (process-tree node) "
+      "  (if (null? node) '() "
+      "    (append (map process-tree (cdr node)) (list (car node)))))"))
+  )
+
+;; ============================================================
+;; Test Group: Type-env lookup
+;; ============================================================
+(display "=== Type-env lookup ===") (newline)
+
+(let ((env (list (cons 'x type:number) (cons 'lst (make-type-list type:number)))))
+  (assert-true "type-env-lookup finds number type"
+    (type=? type:number (type-env-lookup env 'x)))
+  (assert-true "type-env-lookup finds list type"
+    (type-list? (type-env-lookup env 'lst)))
+  (assert-equal "type-env-lookup returns #f for missing var"
+    #f
+    (type-env-lookup env 'y)))
+
+;; ============================================================
+;; Test Group: Type-aware termination (positive - with type-env)
+;; ============================================================
+(display "=== Type-aware termination: positive ===") (newline)
+
+;; Named-let list traversal with type-env providing (List Number)
+(let* ((type-env (list (cons 'lst (make-type-list type:number))))
+       (exprs (read-all-expressions
+                "(let loop ((lst lst)) (if (null? lst) 0 (+ (car lst) (loop (cdr lst)))))"))
+       (violations (check-termination exprs type-env)))
+  (assert-no-violations "typed list traversal via named-let" violations))
+
+;; Direct recursion over typed list parameter
+(let* ((type-env (list (cons 'xs (make-type-list type:string))))
+       (exprs (read-all-expressions
+                "(define (count xs) (if (null? xs) 0 (+ 1 (count (cdr xs)))))"))
+       (violations (check-termination exprs type-env)))
+  (assert-no-violations "typed list recursion: count" violations))
+
+;; Accumulator pattern with typed list
+(let* ((type-env (list (cons 'lst (make-type-list type:number))))
+       (exprs (read-all-expressions
+                "(let loop ((lst lst) (acc 0)) (if (null? lst) acc (loop (cdr lst) (+ acc (car lst)))))"))
+       (violations (check-termination exprs type-env)))
+  (assert-no-violations "typed list accumulator pattern" violations))
+
+;; ============================================================
+;; Test Group: Type-aware termination (negative - violations expected)
+;; ============================================================
+(display "=== Type-aware termination: negative ===") (newline)
+
+;; No decrease, no base case (type info doesn't help)
+(let* ((type-env (list (cons 'x type:number)))
+       (exprs (read-all-expressions
+                "(let loop ((x (get-items))) (loop x))"))
+       (violations (check-termination exprs type-env)))
+  (assert-violation-count "no decrease even with type info" 1 violations)
+  (assert-equal "no-decrease-with-type kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; Decrease without base case (type info doesn't add missing base case)
+(let* ((type-env (list (cons 'n type:number)))
+       (exprs (read-all-expressions
+                "(let loop ((n 10)) (loop (- n 1)))"))
+       (violations (check-termination exprs type-env)))
+  (assert-violation-count "decrease but no base case with type info" 1 violations)
+  (assert-equal "no-base-with-type kind"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; Direct recursion without decrease (type info doesn't help)
+(let* ((type-env (list (cons 'n type:number)))
+       (exprs (read-all-expressions
+                "(define (f n) (f n))"))
+       (violations (check-termination exprs type-env)))
+  (assert-violation-count "direct recursion no decrease with type" 1 violations))
+
+;; Mutual recursion without decrease
+(let* ((type-env (list (cons 'n type:number)))
+       (exprs (read-all-expressions
+                (string-append
+                  "(define (ping n) (pong n)) "
+                  "(define (pong n) (ping n))")))
+       (violations (check-termination exprs type-env)))
+  (assert-violation-count "mutual recursion no decrease with type" 2 violations))
+
+;; Named-let typed list traversal with decrease but no base case
+;; Type info should NOT suppress no-base-case when guard is missing
+(let* ((type-env (list (cons 'lst (make-type-list type:number))))
+       (exprs (read-all-expressions
+                "(let loop ((lst lst)) (loop (cdr lst)))"))
+       (violations (check-termination exprs type-env)))
+  (assert-violation-count "typed list decrease but no base case (named-let)" 1 violations)
+  (assert-equal "typed list no-base-case kind (named-let)"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; Direct recursion over typed list parameter with decrease but no base case
+(let* ((type-env (list (cons 'xs (make-type-list type:number))))
+       (exprs (read-all-expressions
+                "(define (f xs) (f (cdr xs)))"))
+       (violations (check-termination exprs type-env)))
+  (assert-violation-count "typed list decrease but no base case (direct)" 1 violations)
+  (assert-equal "typed list no-base-case kind (direct)"
+    'no-base-case
+    (termination-violation-kind (car violations))))
+
+;; Zero-variable named-let
+(let* ((type-env '())
+       (exprs (read-all-expressions "(let loop () (loop))"))
+       (violations (check-termination exprs type-env)))
+  (assert-violation-count "zero-variable loop still flagged with empty type-env" 1 violations))
+
+;; ============================================================
+;; Test Group: Type-env interaction (same code, with and without types)
+;; ============================================================
+(display "=== Type-env interaction ===") (newline)
+
+;; This code should pass even without type info (syntactic analysis catches it)
+(let* ((exprs (read-all-expressions
+                "(let loop ((lst '(1 2 3))) (if (null? lst) 0 (loop (cdr lst))))"))
+       (violations-no-type (check-termination exprs '()))
+       (violations-typed (check-termination exprs
+                           (list (cons 'lst (make-type-list type:number))))))
+  (assert-no-violations "list traversal passes without type-env" violations-no-type)
+  (assert-no-violations "list traversal passes with type-env" violations-typed))
+
+;; This code should fail regardless of type info
+(let* ((exprs (read-all-expressions "(let loop ((n 10)) (loop n))"))
+       (violations-no-type (check-termination exprs '()))
+       (violations-typed (check-termination exprs
+                           (list (cons 'n type:number)))))
+  (assert-violation-count "no-decrease fails without type" 1 violations-no-type)
+  (assert-violation-count "no-decrease fails with type" 1 violations-typed))
+
+;; ============================================================
+;; Test Group: Record type termination (linked-list traversal)
+;; ============================================================
+(display "=== Record type termination ===") (newline)
+
+;; Linked-list pattern: record with nullable self-reference
+;; node type: (Record ((value . Number) (next . (U (Record ...) Null))))
+;; For simplicity, we use a non-recursive union with Null
+(let* ((node-type (make-type-record
+                    (list (cons 'value type:number)
+                          (cons 'next (make-type-union (list type:any type:null))))
+                    '(value next)))
+       (type-env (list (cons 'n node-type)))
+       ;; Direct recursion: (define (traverse n) (if (null? n) '() (traverse (node-next n))))
+       (exprs (read-all-expressions
+                "(define (traverse n) (if (null? n) '() (traverse (node-next n))))"))
+       (violations (check-termination exprs type-env)))
+  (assert-no-violations "record linked-list traversal with type-env" violations))
+
+;; Same code without type-env should fail (syntactic analysis doesn't know node-next is decreasing)
+(let* ((exprs (read-all-expressions
+                "(define (traverse n) (if (null? n) '() (traverse (node-next n))))"))
+       (violations (check-termination exprs '())))
+  (assert-violation-count "record traversal without type-env flagged" 1 violations)
+  (assert-equal "record traversal no-type violation kind"
+    'no-decreasing-arg
+    (termination-violation-kind (car violations))))
+
+;; Named-let with record traversal
+(let* ((node-type (make-type-record
+                    (list (cons 'value type:number)
+                          (cons 'next (make-type-union (list type:any type:null))))
+                    '(value next)))
+       (type-env (list (cons 'node node-type)))
+       (exprs (read-all-expressions
+                "(let loop ((node node)) (if (null? node) 0 (+ (node-value node) (loop (node-next node)))))"))
+       (violations (check-termination exprs type-env)))
+  (assert-no-violations "named-let record traversal with type-env" violations))
+
+;; Suffix ambiguity: record with fields "name" and "full-name"
+;; accessor "node-full-name" should match "full-name" (longer), not "name"
+(let* ((node-type (make-type-record
+                    (list (cons 'name type:string)
+                          (cons 'full-name (make-type-union (list type:any type:null)))
+                          (cons 'next (make-type-union (list type:any type:null))))
+                    '(name full-name next)))
+       (type-env (list (cons 'n node-type)))
+       ;; Traversal using node-full-name — should resolve to full-name (nullable) not name
+       (exprs (read-all-expressions
+                "(define (traverse n) (if (null? n) '() (traverse (node-full-name n))))"))
+       (violations (check-termination exprs type-env)))
+  (assert-no-violations "suffix ambiguity: longest match resolves node-full-name to full-name" violations))
 
 ;; ============================================================
 ;; Results

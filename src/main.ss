@@ -2,11 +2,12 @@
 ;; CLI entry point for the whitelist checker, type checker, and termination analysis.
 ;;
 ;; Usage:
-;;   scheme --libdirs src:<packrat-extended-path> --program src/main.ss [--no-termination] [--termination-depth N] <source-file> <whitelist-file> [<type-signatures-file>]
+;;   scheme --libdirs src:<packrat-extended-path>:<packrat-examples-path> --program src/main.ss [--no-termination] [--termination-depth N] [--tool-schemas <path>] <source-file> <whitelist-file> [<type-signatures-file>]
 ;;
 ;; Flags:
 ;;   --no-termination       Disable termination analysis pass (enabled by default)
 ;;   --termination-depth N  Skip call-graph analysis if program has more than N definitions
+;;   --tool-schemas <path>  Load tool JSON Schemas from file, merge with type signatures
 ;;
 ;; Exit code 0 if no violations, 1 if violations found.
 
@@ -15,10 +16,11 @@
         (harness-checker types)
         (harness-checker pass1-constraints)
         (harness-checker type-infer)
-        (harness-checker termination))
+        (harness-checker termination)
+        (harness-checker schema-registry))
 
 ;; Flags that consume the next argument as their value
-(define flags-with-value '("--termination-depth"))
+(define flags-with-value '("--termination-depth" "--tool-schemas"))
 
 ;; Extract --flags from args, returning (flags . positional-args)
 ;; Flags listed in flags-with-value consume the following argument as a value,
@@ -77,9 +79,10 @@
          (termination-depth-str (get-flag-value flags "--termination-depth"))
          (termination-depth (if termination-depth-str
                                 (string->number termination-depth-str)
-                                #f)))
+                                #f))
+         (tool-schemas-path (get-flag-value flags "--tool-schemas")))
     (when (< (length positional) 2)
-      (display "Usage: scheme --libdirs src --program src/main.ss [--no-termination] [--termination-depth N] <source-file> <whitelist-file> [<type-signatures-file>]")
+      (display "Usage: scheme --libdirs src --program src/main.ss [--no-termination] [--termination-depth N] [--tool-schemas <path>] <source-file> <whitelist-file> [<type-signatures-file>]")
       (newline)
       (exit 1))
     (let* ((source-path (car positional))
@@ -104,14 +107,21 @@
        wl-violations))
 
     ;; Load type signatures once if provided (shared by type checker and termination analysis)
-    (let ((signatures (if signatures-path
-                          (load-type-signatures signatures-path)
-                          '())))
+    ;; Merge with tool schemas if --tool-schemas is specified
+    (let ((signatures (let ((base-sigs (if signatures-path
+                                           (load-type-signatures signatures-path)
+                                           '()))
+                            (tool-sigs (if tool-schemas-path
+                                           (load-tool-schemas tool-schemas-path)
+                                           '())))
+                        ;; Tool schemas first: assq finds first match, so tool-specific
+                        ;; types take precedence over base signatures
+                        (append tool-sigs base-sigs))))
 
-    ;; Run type checker if signatures file provided
+    ;; Run type checker if any type information is available
     (let ((type-errors '())
           (constraint-errors '()))
-      (when signatures-path
+      (when (not (null? signatures))
         (let* (;; Pass 1: infer parameter constraints
                (pass1-result (infer-param-constraints exprs signatures))
                (param-types (car pass1-result))

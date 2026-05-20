@@ -1039,6 +1039,7 @@
 (let ((violations (check-termination
                     (read-all-expressions "(define (f n) (f n))")
                     '()
+                    '()
                     0)))  ;; depth-limit = 0 skips call-graph phases
   (assert-no-violations "depth-limit 0: skips direct recursion check" violations))
 

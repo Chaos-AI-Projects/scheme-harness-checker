@@ -17,7 +17,8 @@
         (harness-checker pass1-constraints)
         (harness-checker type-infer)
         (harness-checker termination)
-        (harness-checker schema-registry))
+        (harness-checker schema-registry)
+        (harness-checker type-env-builder))
 
 ;; Flags that consume the next argument as their value
 (define flags-with-value '("--termination-depth" "--tool-schemas"))
@@ -120,15 +121,17 @@
 
     ;; Run type checker if any type information is available
     (let ((type-errors '())
-          (constraint-errors '()))
+          (constraint-errors '())
+          (param-types '()))
       (when (not (null? signatures))
         (let* (;; Pass 1: infer parameter constraints
                (pass1-result (infer-param-constraints exprs signatures))
-               (param-types (car pass1-result))
+               (p1-types (car pass1-result))
                (param-arities (cadr pass1-result))
                (p1-errors (caddr pass1-result))
                ;; Pass 2: type inference and call-site checking
-               (p2-errors (check-types exprs signatures param-types param-arities)))
+               (p2-errors (check-types exprs signatures p1-types param-arities)))
+          (set! param-types p1-types)
           (set! constraint-errors p1-errors)
           (set! type-errors p2-errors)))
 
@@ -188,12 +191,19 @@
               (newline))))
          type-errors))
 
-      ;; Run termination analysis if enabled
-      (let ((term-violations '()))
+      ;; Build per-function param-types for termination analysis by merging:
+      ;;   1. Function signature-derived parameter types
+      ;;   2. Pass 1 inferred parameter types (higher priority)
+      ;; The global type-env is the raw signatures alist (function-level types).
+      ;; param-types provides per-function scoping: each function's bindings are
+      ;; prepended to type-env when analyzing that function's body.
+      (let* ((merged-param-types (build-type-env exprs signatures param-types))
+             (type-env signatures)
+             (term-violations '()))
         (when termination-enabled?
           (let ((tv (if termination-depth
-                        (check-termination exprs signatures termination-depth)
-                        (check-termination exprs signatures))))
+                        (check-termination exprs type-env merged-param-types termination-depth)
+                        (check-termination exprs type-env merged-param-types))))
             (set! term-violations tv)))
 
         ;; Report termination violations

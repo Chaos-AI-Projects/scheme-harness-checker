@@ -736,36 +736,77 @@
   ;; Checks:
   ;;   - recursive calls use decreasing arguments
   ;;   - a base case exists (conditional branch that doesn't recurse)
-  ;; type-env is optional (defaults to '()).
+  ;; type-env: global type-env (defaults to '()).
+  ;; param-types: per-function parameter type alist (defaults to '()).
+  ;;   When a named-let is found inside a function definition, the enclosing
+  ;;   function's parameter bindings are prepended to type-env for analysis.
   ;; Returns a list of termination-violation records.
   (define analyze-named-let-forms
     (case-lambda
-      ((exprs) (analyze-named-let-forms exprs '()))
-      ((exprs type-env)
+      ((exprs) (analyze-named-let-forms exprs '() '()))
+      ((exprs type-env) (analyze-named-let-forms exprs type-env '()))
+      ((exprs type-env param-types)
        (let ((violations '()))
          (define (add-violation! kind loop-name expr reason)
            (set! violations
              (cons (make-termination-violation kind loop-name expr reason)
                    violations)))
 
-         (define (walk expr)
+         ;; Walk expressions, tracking current scoped type-env.
+         ;; When entering a function definition, extend the env with
+         ;; that function's parameter types from param-types.
+         (define (walk expr current-env)
            (when (pair? expr)
              (unless (eq? (car expr) 'quote)
-               ;; Check for named-let: (let <symbol> ((var init) ...) body ...)
-               (when (and (eq? (car expr) 'let)
-                          (pair? (cdr expr))
-                          (symbol? (cadr expr))
-                          (pair? (cddr expr))
-                          (pair? (cdddr expr)))
-                 (check-named-let expr))
-               ;; Walk car if compound
-               (when (pair? (car expr))
-                 (walk (car expr)))
-               ;; Walk sub-expressions
-               (for-each (lambda (sub) (when (pair? sub) (walk sub)))
-                         (cdr expr)))))
+               (cond
+                 ;; (define (name params...) body...) — scope param-types
+                 ((and (eq? (car expr) 'define)
+                       (pair? (cdr expr))
+                       (pair? (cadr expr))
+                       (symbol? (caadr expr)))
+                  (let* ((name (caadr expr))
+                         (fn-params (assq name param-types))
+                         (scoped-env (if fn-params
+                                        (append (cdr fn-params) type-env)
+                                        current-env)))
+                    (for-each (lambda (sub) (walk sub scoped-env)) (cddr expr))))
 
-         (define (check-named-let expr)
+                 ;; (define name (lambda (params...) body...)) — scope param-types
+                 ((and (eq? (car expr) 'define)
+                       (pair? (cdr expr))
+                       (symbol? (cadr expr))
+                       (pair? (cddr expr))
+                       (pair? (caddr expr))
+                       (eq? (car (caddr expr)) 'lambda)
+                       (pair? (cdr (caddr expr))))
+                  (let* ((name (cadr expr))
+                         (fn-params (assq name param-types))
+                         (scoped-env (if fn-params
+                                        (append (cdr fn-params) type-env)
+                                        current-env)))
+                    (for-each (lambda (sub) (walk sub scoped-env)) (cddr (caddr expr)))))
+
+                 ;; Named-let: analyze with current scoped env
+                 ((and (eq? (car expr) 'let)
+                       (pair? (cdr expr))
+                       (symbol? (cadr expr))
+                       (pair? (cddr expr))
+                       (pair? (cdddr expr)))
+                  (check-named-let expr current-env)
+                  ;; Continue walking sub-expressions
+                  (when (pair? (car expr))
+                    (walk (car expr) current-env))
+                  (for-each (lambda (sub) (when (pair? sub) (walk sub current-env)))
+                            (cdr expr)))
+
+                 ;; Generic: recurse into sub-expressions
+                 (else
+                  (when (pair? (car expr))
+                    (walk (car expr) current-env))
+                  (for-each (lambda (sub) (when (pair? sub) (walk sub current-env)))
+                            (cdr expr)))))))
+
+         (define (check-named-let expr current-env)
            (let* ((loop-name (cadr expr))
                   (bindings (caddr expr))
                   (body (cdddr expr))
@@ -788,18 +829,18 @@
                (cond
                  ;; No variables or no decreasing argument in recursive calls
                  ((or (null? vars)
-                      (not (has-decreasing-call? body loop-name vars type-env)))
+                      (not (has-decreasing-call? body loop-name vars current-env)))
                   (add-violation! 'no-decreasing-arg loop-name expr
                     (string-append "named-let \"" (symbol->string loop-name)
                       "\" has no decreasing argument in recursive call(s)")))
 
                  ;; Has decreasing args but no base case
-                 ((not (has-base-case? body loop-name vars type-env))
+                 ((not (has-base-case? body loop-name vars current-env))
                   (add-violation! 'no-base-case loop-name expr
                     (string-append "named-let \"" (symbol->string loop-name)
                       "\" has no reachable base case")))))))
 
-         (for-each walk exprs)
+         (for-each (lambda (expr) (walk expr type-env)) exprs)
          (reverse violations)))))
 
   ;; Like has-decreasing-call? but only accepts strictly decreasing patterns
@@ -958,11 +999,15 @@
   ;; Uses call graph + SCC to identify direct recursion (single-node SCCs
   ;; with a self-edge), then reuses has-decreasing-call? and has-base-case?
   ;; from named-let analysis.
-  ;; type-env is optional (defaults to '()).
+  ;; type-env: global type-env (defaults to '()).
+  ;; param-types: per-function parameter type alist (defaults to '()).
+  ;;   For each function, a local-type-env is built by prepending the
+  ;;   function's parameter bindings to the global type-env.
   (define analyze-direct-recursion
     (case-lambda
-      ((exprs) (analyze-direct-recursion exprs '()))
-      ((exprs type-env)
+      ((exprs) (analyze-direct-recursion exprs '() '()))
+      ((exprs type-env) (analyze-direct-recursion exprs type-env '()))
+      ((exprs type-env param-types)
        (let* ((graph (build-call-graph exprs))
               (sccs (tarjan-scc graph))
               (violations '()))
@@ -983,13 +1028,18 @@
                       (def-entry (assq name graph))
                       (body-entry (assq name (extract-definitions exprs)))
                       (body (if body-entry (cdr body-entry) '()))
-                      (def-form (find-definition-form exprs name)))
+                      (def-form (find-definition-form exprs name))
+                      ;; Build per-function scoped type-env
+                      (fn-params (assq name param-types))
+                      (local-type-env (if fn-params
+                                         (append (cdr fn-params) type-env)
+                                         type-env)))
                  ;; Only analyze if we could extract formals
                  (when formals
                    (cond
                      ;; No formals or no strictly decreasing argument in any recursive call
                      ((or (null? formals)
-                          (not (has-strictly-decreasing-call? body name formals type-env)))
+                          (not (has-strictly-decreasing-call? body name formals local-type-env)))
                       (add-violation! 'no-decreasing-arg name
                         (or def-form (list 'define name '...))
                         (string-append "recursive function \""
@@ -997,7 +1047,7 @@
                           "\" has no decreasing argument in recursive call(s)")))
 
                      ;; Has decreasing args but no base case
-                     ((not (has-base-case? body name formals type-env))
+                     ((not (has-base-case? body name formals local-type-env))
                       (add-violation! 'no-base-case name
                         (or def-form (list 'define name '...))
                         (string-append "recursive function \""
@@ -1162,11 +1212,13 @@
   ;;   - Check that every intra-SCC call edge passes a strictly decreasing argument
   ;;   - Check that at least one function in the SCC has a base case
   ;; If any call edge cannot be proven decreasing, flag all functions in the SCC.
-  ;; type-env is optional (defaults to '()).
+  ;; type-env: global type-env (defaults to '()).
+  ;; param-types: per-function parameter type alist (defaults to '()).
   (define analyze-mutual-recursion
     (case-lambda
-      ((exprs) (analyze-mutual-recursion exprs '()))
-      ((exprs type-env)
+      ((exprs) (analyze-mutual-recursion exprs '() '()))
+      ((exprs type-env) (analyze-mutual-recursion exprs type-env '()))
+      ((exprs type-env param-types)
        (let* ((graph (build-call-graph exprs))
               (sccs (tarjan-scc graph))
               (defs (extract-definitions exprs))
@@ -1191,7 +1243,12 @@
                                     (formals (find-formals-for exprs name))
                                     (body-entry (assq name defs))
                                     (body (if body-entry (cdr body-entry) '()))
-                                    (intra-calls (collect-intra-scc-calls body scc-names)))
+                                    (intra-calls (collect-intra-scc-calls body scc-names))
+                                    ;; Per-function scoped type-env
+                                    (fn-params (assq name param-types))
+                                    (local-type-env (if fn-params
+                                                       (append (cdr fn-params) type-env)
+                                                       type-env)))
                                (if (or (not formals)
                                        (null? formals))
                                    ;; Can't extract formals -- conservative: fail
@@ -1200,7 +1257,7 @@
                                      (cond
                                        ((null? calls)
                                         (check-members (cdr members)))
-                                       ((call-has-decreasing-arg? (car calls) formals type-env)
+                                       ((call-has-decreasing-arg? (car calls) formals local-type-env)
                                         (check-calls (cdr calls)))
                                        (else #f)))))))))
 
@@ -1262,18 +1319,24 @@
   ;; Main entry point
   ;; ---------------------------------------------------------------
 
-  ;; check-termination : (list-of expr) x type-env [x max-definitions] -> (list-of termination-violation)
+  ;; check-termination : (list-of expr) x type-env [x param-types [x max-definitions]] -> (list-of termination-violation)
   ;; Analyzes expressions for potential non-termination.
+  ;; type-env: global type-env alist (function-level signatures).
+  ;; param-types: per-function parameter type alist ((fn-name . ((param . type) ...)) ...)
+  ;;   from build-type-env.  Each function's bindings are prepended to type-env
+  ;;   when analyzing that function's body (syntactic scoping).
   ;; Optional max-definitions parameter: when set, skip call-graph-based analysis
   ;; (direct recursion, mutual recursion) if the program has more definitions than this limit.
   ;; A value of 0 disables call-graph analysis entirely. #f means no limit (default).
   (define check-termination
     (case-lambda
       ((exprs type-env)
-       (check-termination exprs type-env #f))
-      ((exprs type-env max-definitions)
+       (check-termination exprs type-env '() #f))
+      ((exprs type-env param-types)
+       (check-termination exprs type-env param-types #f))
+      ((exprs type-env param-types max-definitions)
        (let ((do-violations (analyze-do-forms exprs))
-             (named-let-violations (analyze-named-let-forms exprs type-env)))
+             (named-let-violations (analyze-named-let-forms exprs type-env param-types)))
          (if (and max-definitions
                   (let ((defs (extract-definitions exprs)))
                     (> (length defs) max-definitions)))
@@ -1282,6 +1345,6 @@
              ;; Full analysis
              (append do-violations
                      named-let-violations
-                     (analyze-direct-recursion exprs type-env)
-                     (analyze-mutual-recursion exprs type-env)))))))
+                     (analyze-direct-recursion exprs type-env param-types)
+                     (analyze-mutual-recursion exprs type-env param-types)))))))
 )

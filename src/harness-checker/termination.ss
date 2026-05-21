@@ -38,6 +38,10 @@
           analyze-mutual-recursion
           ;; Collection HOF whitelist
           collection-hof?
+          ;; HOF callback analysis
+          hof-callback-position
+          collect-hof-callback-edges
+          check-hof-callbacks
           ;; Type-env lookup
           type-env-lookup)
   (import (rnrs)
@@ -103,6 +107,31 @@
   ;; Check if a symbol is a known-terminating collection HOF.
   (define (collection-hof? sym)
     (and (memq sym collection-hof-names) #t))
+
+  ;; Mapping from each collection HOF to the zero-based positional index
+  ;; of its callback argument, or #f if it takes no callback.
+  ;;
+  ;; The collection-hof-names whitelist vouches for the *iteration mechanism*
+  ;; terminating (bounded by collection size). Callback termination is checked
+  ;; separately by check-hof-callbacks, which runs after SCC analysis.
+  ;; Inline lambdas are covered by normal collect-calls-in-body traversal;
+  ;; collect-hof-callback-edges handles symbol references only.
+  ;; Functions not in the user-defined set are assumed safe (not the
+  ;; responsibility of this check).
+  (define collection-hof-callback-position
+    '((map . 0) (for-each . 0) (filter . 0) (remove . 0)
+      (remp . 0) (remv . #f) (remq . #f)
+      (fold-left . 0) (fold-right . 0)
+      (find . 0) (exists . 0) (for-all . 0) (memp . 0)
+      (memv . #f) (memq . #f)
+      (assoc . #f) (assv . #f) (assq . #f)
+      (vector-map . 0) (vector-for-each . 0) (string-for-each . 0)))
+
+  ;; Look up the callback position for a HOF. Returns the zero-based
+  ;; index or #f if the HOF takes no callback argument.
+  (define (hof-callback-position sym)
+    (let ((entry (assq sym collection-hof-callback-position)))
+      (and entry (cdr entry))))
 
   ;; ---------------------------------------------------------------
   ;; Record accessor type resolution
@@ -264,6 +293,31 @@
             (for-each walk (cdr expr)))))
       (for-each walk body-exprs)
       (deduplicate calls)))
+
+  ;; Collect HOF callback edges from body expressions.
+  ;; For each application where (car expr) is a collection-hof with a
+  ;; non-#f callback position, extract the callback argument. If it is
+  ;; a symbol, record it as a HOF callback edge (caller-name . callback-symbol).
+  ;; Inline lambdas are skipped — they are already handled by normal
+  ;; collect-calls-in-body traversal which recurses into (cdr expr).
+  (define (collect-hof-callback-edges body-exprs caller-name)
+    (let ((edges '()))
+      (define (walk expr)
+        (when (pair? expr)
+          (unless (eq? (car expr) 'quote)
+            (when (and (symbol? (car expr)) (collection-hof? (car expr)))
+              (let ((cb-pos (hof-callback-position (car expr))))
+                (when cb-pos
+                  (let ((args (cdr expr)))
+                    (when (> (length args) cb-pos)
+                      (let ((cb-arg (list-ref args cb-pos)))
+                        (when (symbol? cb-arg)
+                          (set! edges (cons (cons caller-name cb-arg) edges)))))))))
+            (for-each walk (cdr expr))
+            (when (pair? (car expr))
+              (walk (car expr))))))
+      (for-each walk body-exprs)
+      edges))
 
   ;; ---------------------------------------------------------------
   ;; Phase 2: Call graph construction
@@ -1316,6 +1370,45 @@
                syms))
 
   ;; ---------------------------------------------------------------
+  ;; Phase 7: HOF callback termination analysis
+  ;; ---------------------------------------------------------------
+
+  ;; Check that callback functions passed to collection HOFs are proven
+  ;; terminating. Only checks symbol references to user-defined functions.
+  ;; A callback symbol NOT in the user-defined set is assumed safe — it's
+  ;; either a built-in or will be caught by the separate function whitelist.
+  ;; defs: alist of (name . body-exprs) from extract-definitions.
+  ;; defined-names: list of all user-defined function names.
+  ;; proven-terminating: list of user-defined names proven to terminate.
+  (define (check-hof-callbacks defs defined-names proven-terminating)
+    (let ((violations '()))
+      (for-each
+        (lambda (def)
+          (let* ((fname (car def))
+                 (body (cdr def))
+                 (edges (collect-hof-callback-edges body fname)))
+            (for-each
+              (lambda (edge)
+                (let ((cb-sym (cdr edge)))
+                  (when (memq cb-sym defined-names)
+                    (unless (memq cb-sym proven-terminating)
+                      (set! violations
+                        (cons (make-termination-violation
+                                'hof-callback-not-terminating
+                                fname
+                                (find-definition-form
+                                  (map (lambda (d) (list 'define (car d) '...)) defs)
+                                  fname)
+                                (string-append
+                                  "HOF callback \"" (symbol->string cb-sym)
+                                  "\" passed in function \"" (symbol->string fname)
+                                  "\" is not proven terminating"))
+                              violations))))))
+              edges)))
+        defs)
+      (reverse violations)))
+
+  ;; ---------------------------------------------------------------
   ;; Main entry point
   ;; ---------------------------------------------------------------
 
@@ -1326,7 +1419,8 @@
   ;;   from build-type-env.  Each function's bindings are prepended to type-env
   ;;   when analyzing that function's body (syntactic scoping).
   ;; Optional max-definitions parameter: when set, skip call-graph-based analysis
-  ;; (direct recursion, mutual recursion) if the program has more definitions than this limit.
+  ;; (direct recursion, mutual recursion, HOF callback checks) if the program has
+  ;; more definitions than this limit.
   ;; A value of 0 disables call-graph analysis entirely. #f means no limit (default).
   (define check-termination
     (case-lambda
@@ -1342,9 +1436,20 @@
                     (> (length defs) max-definitions)))
              ;; Skip call-graph analysis when over the depth limit
              (append do-violations named-let-violations)
-             ;; Full analysis
-             (append do-violations
-                     named-let-violations
-                     (analyze-direct-recursion exprs type-env param-types)
-                     (analyze-mutual-recursion exprs type-env param-types)))))))
+             ;; Full analysis including HOF callback checks
+             (let* ((defs (extract-definitions exprs))
+                    (defined-names (map car defs))
+                    (base-violations
+                      (append (analyze-direct-recursion exprs type-env param-types)
+                              (analyze-mutual-recursion exprs type-env param-types)))
+                    (violated-names
+                      (map termination-violation-function base-violations))
+                    (proven-terminating
+                      (remp (lambda (n) (memq n violated-names)) defined-names))
+                    (hof-violations
+                      (check-hof-callbacks defs defined-names proven-terminating)))
+               (append do-violations
+                       named-let-violations
+                       base-violations
+                       hof-violations)))))))
 )

@@ -1323,6 +1323,195 @@
   (assert-no-violations "suffix ambiguity: longest match resolves node-full-name to full-name" violations))
 
 ;; ============================================================
+;; Test Group: HOF callback position metadata
+;; ============================================================
+(display "=== HOF callback position metadata ===") (newline)
+
+(assert-equal "hof-callback-position: map has callback at position 0"
+  0
+  (hof-callback-position 'map))
+
+(assert-equal "hof-callback-position: fold-left has callback at position 0"
+  0
+  (hof-callback-position 'fold-left))
+
+(assert-equal "hof-callback-position: filter has callback at position 0"
+  0
+  (hof-callback-position 'filter))
+
+(assert-equal "hof-callback-position: vector-map has callback at position 0"
+  0
+  (hof-callback-position 'vector-map))
+
+;; HOFs with no callback (use eq?/eqv? internally)
+(assert-equal "hof-callback-position: memv has no callback"
+  #f
+  (hof-callback-position 'memv))
+
+(assert-equal "hof-callback-position: memq has no callback"
+  #f
+  (hof-callback-position 'memq))
+
+(assert-equal "hof-callback-position: remv has no callback"
+  #f
+  (hof-callback-position 'remv))
+
+(assert-equal "hof-callback-position: assoc has no callback"
+  #f
+  (hof-callback-position 'assoc))
+
+(assert-equal "hof-callback-position: unknown symbol returns #f"
+  #f
+  (hof-callback-position 'my-custom-fn))
+
+;; ============================================================
+;; Test Group: collect-hof-callback-edges
+;; ============================================================
+(display "=== collect-hof-callback-edges ===") (newline)
+
+;; (map f lst) -> edge from caller to f
+(let ((edges (collect-hof-callback-edges
+               (read-all-expressions "(map helper lst)")
+               'process)))
+  (assert-equal "collect-hof-callback-edges: map with symbol callback"
+    '((process . helper))
+    edges))
+
+;; (map (lambda (x) (+ x 1)) lst) -> no edges (lambda, not symbol)
+(let ((edges (collect-hof-callback-edges
+               (read-all-expressions "(map (lambda (x) (+ x 1)) lst)")
+               'process)))
+  (assert-equal "collect-hof-callback-edges: map with lambda callback"
+    '()
+    edges))
+
+;; (memq val lst) -> no edges (no callback position)
+(let ((edges (collect-hof-callback-edges
+               (read-all-expressions "(memq val lst)")
+               'process)))
+  (assert-equal "collect-hof-callback-edges: memq has no callback edge"
+    '()
+    edges))
+
+;; (fold-left combine init lst) -> edge from caller to combine
+(let ((edges (collect-hof-callback-edges
+               (read-all-expressions "(fold-left combine 0 lst)")
+               'accum)))
+  (assert-equal "collect-hof-callback-edges: fold-left with symbol callback"
+    '((accum . combine))
+    edges))
+
+;; nested HOF calls: (map f (filter g lst))
+(let ((edges (collect-hof-callback-edges
+               (read-all-expressions "(map f (filter g lst))")
+               'process)))
+  (assert-true "collect-hof-callback-edges: nested HOFs produce two edges"
+    (= 2 (length edges)))
+  (assert-true "collect-hof-callback-edges: nested HOFs include f and g"
+    (let ((cbs (map cdr edges)))
+      (and (memq 'f cbs) (memq 'g cbs) #t))))
+
+;; ============================================================
+;; Test Group: HOF callback termination (positive - no violations)
+;; ============================================================
+(display "=== HOF callback termination: positive ===") (newline)
+
+;; Safe user-defined callback: (map safe-fn lst) where safe-fn is non-recursive
+(assert-no-violations "HOF with safe user-defined callback"
+  (check-source-termination
+    (string-append
+      "(define (process lst) (map safe-fn lst)) "
+      "(define (safe-fn x) (+ x 1))")))
+
+;; Built-in callback: (map car lst) -- car is not in defined-names, so skipped
+(assert-no-violations "HOF with built-in callback"
+  (check-source-termination
+    "(define (process lst) (map car lst))"))
+
+;; Inline lambda callback -- no symbol resolution needed
+(assert-no-violations "HOF with inline lambda callback"
+  (check-source-termination
+    "(define (process lst) (map (lambda (x) (+ x 1)) lst))"))
+
+;; Callback that is not in user-defined set (unresolvable) -- assumed safe
+(assert-no-violations "HOF with unresolvable callback symbol"
+  (check-source-termination
+    "(define (process lst) (map mystery-fn lst))"))
+
+;; HOF with no callback position (memq, assq etc.)
+(assert-no-violations "memq does not trigger callback check"
+  (check-source-termination
+    "(define (find-it lst) (memq 'x lst))"))
+
+(assert-no-violations "assq does not trigger callback check"
+  (check-source-termination
+    "(define (lookup lst) (assq 'key lst))"))
+
+;; Terminating recursive callback used in HOF
+(assert-no-violations "HOF with terminating recursive callback"
+  (check-source-termination
+    (string-append
+      "(define (process lst) (map my-length lst)) "
+      "(define (my-length xs) (if (null? xs) 0 (+ 1 (my-length (cdr xs)))))")))
+
+;; ============================================================
+;; Test Group: HOF callback termination (negative - violations)
+;; ============================================================
+(display "=== HOF callback termination: negative ===") (newline)
+
+;; Non-terminating callback: (map infinite-fn lst) where infinite-fn has unbounded recursion
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (process lst) (map infinite-fn lst)) "
+            "(define (infinite-fn x) (infinite-fn x))"))))
+  ;; infinite-fn gets flagged for no-decreasing-arg AND process gets
+  ;; flagged for hof-callback-not-terminating
+  (assert-true "non-terminating callback: at least one hof-callback violation"
+    (exists (lambda (v)
+              (eq? (termination-violation-kind v) 'hof-callback-not-terminating))
+            violations))
+  (assert-true "non-terminating callback: violation names process as caller"
+    (exists (lambda (v)
+              (and (eq? (termination-violation-kind v) 'hof-callback-not-terminating)
+                   (eq? (termination-violation-function v) 'process)))
+            violations)))
+
+;; fold-left with non-terminating callback
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (accum lst) (fold-left bad-fn 0 lst)) "
+            "(define (bad-fn acc x) (bad-fn acc x))"))))
+  (assert-true "fold-left with non-terminating callback flagged"
+    (exists (lambda (v)
+              (eq? (termination-violation-kind v) 'hof-callback-not-terminating))
+            violations)))
+
+;; filter with non-terminating predicate
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (select lst) (filter bad-pred lst)) "
+            "(define (bad-pred x) (bad-pred x))"))))
+  (assert-true "filter with non-terminating predicate flagged"
+    (exists (lambda (v)
+              (eq? (termination-violation-kind v) 'hof-callback-not-terminating))
+            violations)))
+
+;; Mutually recursive non-terminating callback
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (process lst) (map ping lst)) "
+            "(define (ping x) (pong x)) "
+            "(define (pong x) (ping x))"))))
+  (assert-true "mutually recursive non-terminating callback flagged"
+    (exists (lambda (v)
+              (eq? (termination-violation-kind v) 'hof-callback-not-terminating))
+            violations)))
+
+;; ============================================================
 ;; Results
 ;; ============================================================
 (newline)

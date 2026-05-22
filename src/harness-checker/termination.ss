@@ -41,6 +41,8 @@
           ;; HOF callback analysis
           hof-callback-position
           collect-hof-callback-edges
+          collect-user-hof-callback-edges
+          detect-user-defined-hofs
           check-hof-callbacks
           ;; Type-env lookup
           type-env-lookup)
@@ -318,6 +320,71 @@
               (walk (car expr))))))
       (for-each walk body-exprs)
       edges))
+
+  ;; Collect user-defined HOF callback edges from body expressions.
+  ;; user-hof-table: alist of ((hof-name . callback-position) ...)
+  ;; Returns list of (caller-name hof-name callback-symbol) triples,
+  ;; where hof-name identifies which user-defined HOF was called.
+  (define (collect-user-hof-callback-edges body-exprs caller-name user-hof-table)
+    (let ((edges '()))
+      (define (walk expr)
+        (when (pair? expr)
+          (unless (eq? (car expr) 'quote)
+            (when (symbol? (car expr))
+              (let ((entry (assq (car expr) user-hof-table)))
+                (when entry
+                  (let ((cb-pos (cdr entry))
+                        (args (cdr expr)))
+                    (when (> (length args) cb-pos)
+                      (let ((cb-arg (list-ref args cb-pos)))
+                        (when (symbol? cb-arg)
+                          (set! edges (cons (list caller-name (car expr) cb-arg) edges)))))))))
+            (for-each walk (cdr expr))
+            (when (pair? (car expr))
+              (walk (car expr))))))
+      (for-each walk body-exprs)
+      edges))
+
+  ;; Check if a symbol appears in call position (car of a non-quoted
+  ;; application) within body expressions.
+  (define (param-in-call-position? sym body-exprs)
+    (let ((found #f))
+      (define (walk expr)
+        (when (and (not found) (pair? expr))
+          (unless (eq? (car expr) 'quote)
+            (when (eq? (car expr) sym)
+              (set! found #t))
+            (when (pair? (car expr))
+              (walk (car expr)))
+            (for-each walk (cdr expr)))))
+      (for-each walk body-exprs)
+      found))
+
+  ;; Detect user-defined higher-order functions by checking if any
+  ;; formal parameter appears in call position within the function body.
+  ;; defs: alist of (name . body-exprs) from extract-definitions.
+  ;; exprs: original expression list (for extracting formals).
+  ;; Returns alist of ((fn-name . callback-position) ...) where
+  ;; callback-position is the zero-based index of the first formal
+  ;; that appears in call position. Functions already in the built-in
+  ;; collection-hof whitelist are excluded.
+  (define (detect-user-defined-hofs defs exprs)
+    (let ((result '()))
+      (for-each
+        (lambda (def)
+          (let* ((name (car def))
+                 (body (cdr def))
+                 (formals (find-formals-for exprs name)))
+            (when (and formals (pair? formals)
+                       (not (collection-hof? name)))
+              (let loop ((fs formals) (pos 0))
+                (unless (or (null? fs) (assq name result))
+                  (when (and (symbol? (car fs))
+                             (param-in-call-position? (car fs) body))
+                    (set! result (cons (cons name pos) result)))
+                  (loop (cdr fs) (+ pos 1)))))))
+        defs)
+      (reverse result)))
 
   ;; ---------------------------------------------------------------
   ;; Phase 2: Call graph construction
@@ -1539,40 +1606,75 @@
   ;; Phase 7: HOF callback termination analysis
   ;; ---------------------------------------------------------------
 
-  ;; Check that callback functions passed to collection HOFs are proven
-  ;; terminating. Only checks symbol references to user-defined functions.
-  ;; A callback symbol NOT in the user-defined set is assumed safe — it's
-  ;; either a built-in or will be caught by the separate function whitelist.
+  ;; Check that callback functions passed to HOFs (both built-in and
+  ;; user-defined) are proven terminating. Only checks symbol references
+  ;; to user-defined functions. A callback symbol NOT in the user-defined
+  ;; set is assumed safe — it's either a built-in or will be caught by
+  ;; the separate function whitelist.
   ;; defs: alist of (name . body-exprs) from extract-definitions.
   ;; defined-names: list of all user-defined function names.
   ;; proven-terminating: list of user-defined names proven to terminate.
-  (define (check-hof-callbacks defs defined-names proven-terminating)
-    (let ((violations '()))
-      (for-each
-        (lambda (def)
-          (let* ((fname (car def))
-                 (body (cdr def))
-                 (edges (collect-hof-callback-edges body fname)))
-            (for-each
-              (lambda (edge)
-                (let ((cb-sym (cdr edge)))
-                  (when (memq cb-sym defined-names)
-                    (unless (memq cb-sym proven-terminating)
-                      (set! violations
-                        (cons (make-termination-violation
-                                'hof-callback-not-terminating
-                                fname
-                                (find-definition-form
-                                  (map (lambda (d) (list 'define (car d) '...)) defs)
-                                  fname)
-                                (string-append
-                                  "HOF callback \"" (symbol->string cb-sym)
-                                  "\" passed in function \"" (symbol->string fname)
-                                  "\" is not proven terminating"))
-                              violations))))))
-              edges)))
-        defs)
-      (reverse violations)))
+  ;; user-hof-table: alist of ((hof-name . callback-position) ...) from
+  ;;   detect-user-defined-hofs. For user-defined HOFs, callbacks are only
+  ;;   checked when the HOF itself is proven terminating — if the HOF is
+  ;;   non-terminating, it is already flagged separately.
+  (define check-hof-callbacks
+    (case-lambda
+      ((defs defined-names proven-terminating)
+       (check-hof-callbacks defs defined-names proven-terminating '()))
+      ((defs defined-names proven-terminating user-hof-table)
+       (let ((violations '()))
+         (for-each
+           (lambda (def)
+             (let* ((fname (car def))
+                    (body (cdr def))
+                    (builtin-edges (collect-hof-callback-edges body fname))
+                    (user-edges (collect-user-hof-callback-edges body fname user-hof-table)))
+               ;; Check built-in HOF callbacks
+               (for-each
+                 (lambda (edge)
+                   (let ((cb-sym (cdr edge)))
+                     (when (memq cb-sym defined-names)
+                       (unless (memq cb-sym proven-terminating)
+                         (set! violations
+                           (cons (make-termination-violation
+                                   'hof-callback-not-terminating
+                                   fname
+                                   (find-definition-form
+                                     (map (lambda (d) (list 'define (car d) '...)) defs)
+                                     fname)
+                                   (string-append
+                                     "HOF callback \"" (symbol->string cb-sym)
+                                     "\" passed in function \"" (symbol->string fname)
+                                     "\" is not proven terminating"))
+                                 violations))))))
+                 builtin-edges)
+               ;; Check user-defined HOF callbacks — only when the HOF
+               ;; itself is proven terminating (otherwise it is already flagged)
+               (for-each
+                 (lambda (edge)
+                   (let ((hof-name (cadr edge))
+                         (cb-sym (caddr edge)))
+                     (when (memq hof-name proven-terminating)
+                       (when (memq cb-sym defined-names)
+                         (unless (memq cb-sym proven-terminating)
+                           (set! violations
+                             (cons (make-termination-violation
+                                     'hof-callback-not-terminating
+                                     fname
+                                     (find-definition-form
+                                       (map (lambda (d) (list 'define (car d) '...)) defs)
+                                       fname)
+                                     (string-append
+                                       "HOF callback \"" (symbol->string cb-sym)
+                                       "\" passed to user-defined HOF \""
+                                       (symbol->string hof-name)
+                                       "\" in function \"" (symbol->string fname)
+                                       "\" is not proven terminating"))
+                                   violations)))))))
+                 user-edges)))
+           defs)
+         (reverse violations)))))
 
   ;; ---------------------------------------------------------------
   ;; Main entry point
@@ -1584,10 +1686,9 @@
   ;; param-types: per-function parameter type alist ((fn-name . ((param . type) ...)) ...)
   ;;   from build-type-env.  Each function's bindings are prepended to type-env
   ;;   when analyzing that function's body (syntactic scoping).
-  ;; Optional max-definitions parameter: when set, skip call-graph-based analysis
-  ;; (direct recursion, mutual recursion, HOF callback checks) if the program has
-  ;; more definitions than this limit.
-  ;; A value of 0 disables call-graph analysis entirely. #f means no limit (default).
+  ;; Optional max-definitions parameter: when set, block the program if it has
+  ;; more definitions than this limit (emit a definition-limit-exceeded violation).
+  ;; A value of 0 blocks all programs with any definitions. #f means no limit (default).
   (define check-termination
     (case-lambda
       ((exprs type-env)
@@ -1596,24 +1697,62 @@
        (check-termination exprs type-env param-types #f))
       ((exprs type-env param-types max-definitions)
        (let ((do-violations (analyze-do-forms exprs))
-             (named-let-violations (analyze-named-let-forms exprs type-env param-types)))
+             (named-let-violations (analyze-named-let-forms exprs type-env param-types))
+             (defs (extract-definitions exprs)))
          (if (and max-definitions
-                  (let ((defs (extract-definitions exprs)))
-                    (> (length defs) max-definitions)))
-             ;; Skip call-graph analysis when over the depth limit
-             (append do-violations named-let-violations)
+                  (> (length defs) max-definitions))
+             ;; Depth limit exceeded: block the program
+             (append do-violations
+                     named-let-violations
+                     (list (make-termination-violation
+                             'definition-limit-exceeded
+                             #f
+                             #f
+                             (string-append "definition count "
+                               (number->string (length defs))
+                               " exceeds analysis limit "
+                               (number->string max-definitions)))))
              ;; Full analysis including HOF callback checks
-             (let* ((defs (extract-definitions exprs))
-                    (defined-names (map car defs))
+             (let* ((defined-names (map car defs))
+                    (graph (build-call-graph exprs))
+                    (sccs (tarjan-scc graph))
                     (base-violations
                       (append (analyze-direct-recursion exprs type-env param-types)
                               (analyze-mutual-recursion exprs type-env param-types)))
                     (violated-names
                       (map termination-violation-function base-violations))
+                    ;; "Can prove terminates" model: a function is proven
+                    ;; terminating only if the checker can positively confirm it.
+                    ;; - Trivially non-recursive (single-node SCC, no self-edge):
+                    ;;   proven by call-graph structure.
+                    ;; - Recursive but analyzed without violations: proven by
+                    ;;   Phase 5/6 analysis.
+                    ;; This fails closed: any function the checker cannot
+                    ;; positively confirm is excluded from the proven set.
+                    (trivially-non-recursive
+                      (let loop ((remaining sccs) (acc '()))
+                        (if (null? remaining)
+                            acc
+                            (let ((scc (car remaining)))
+                              (if (and (= (length scc) 1)
+                                       (not (memq (car scc)
+                                                  (call-graph-edges graph (car scc)))))
+                                  (loop (cdr remaining) (cons (car scc) acc))
+                                  (loop (cdr remaining) acc))))))
                     (proven-terminating
-                      (remp (lambda (n) (memq n violated-names)) defined-names))
+                      (filter
+                        (lambda (n)
+                          (or
+                            ;; Non-recursive: proven by structure
+                            (memq n trivially-non-recursive)
+                            ;; Recursive: proven by analysis (no violations)
+                            (not (memq n violated-names))))
+                        defined-names))
+                    ;; Detect user-defined HOFs and check their callbacks
+                    (user-hof-table (detect-user-defined-hofs defs exprs))
                     (hof-violations
-                      (check-hof-callbacks defs defined-names proven-terminating)))
+                      (check-hof-callbacks defs defined-names proven-terminating
+                                           user-hof-table)))
                (append do-violations
                        named-let-violations
                        base-violations

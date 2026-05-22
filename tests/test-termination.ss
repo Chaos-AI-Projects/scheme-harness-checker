@@ -1034,14 +1034,28 @@
 ;; ============================================================
 (display "=== Depth limit ===") (newline)
 
-;; check-termination with depth limit of 0 should skip call-graph analysis
-;; (only do-form and named-let checks run)
+;; check-termination with depth limit of 0 should block programs that exceed it
+;; (definition count 1 > limit 0 → definition-limit-exceeded violation)
 (let ((violations (check-termination
                     (read-all-expressions "(define (f n) (f n))")
                     '()
                     '()
-                    0)))  ;; depth-limit = 0 skips call-graph phases
-  (assert-no-violations "depth-limit 0: skips direct recursion check" violations))
+                    0)))  ;; depth-limit = 0 blocks any program with definitions
+  (assert-true "depth-limit 0: emits definition-limit-exceeded"
+    (exists (lambda (v)
+              (eq? (termination-violation-kind v) 'definition-limit-exceeded))
+            violations)))
+
+;; Depth limit that is not exceeded allows normal analysis
+(let ((violations (check-termination
+                    (read-all-expressions "(define (f n) (f n))")
+                    '()
+                    '()
+                    10)))  ;; depth-limit = 10, only 1 definition → not exceeded
+  (assert-true "depth-limit not exceeded: catches direct recursion"
+    (exists (lambda (v)
+              (eq? (termination-violation-kind v) 'no-decreasing-arg))
+            violations)))
 
 ;; With no depth limit (default), direct recursion is caught
 (let ((violations (check-termination
@@ -1507,6 +1521,167 @@
             "(define (ping x) (pong x)) "
             "(define (pong x) (ping x))"))))
   (assert-true "mutually recursive non-terminating callback flagged"
+    (exists (lambda (v)
+              (eq? (termination-violation-kind v) 'hof-callback-not-terminating))
+            violations)))
+
+;; ============================================================
+;; Test Group: User-defined HOF detection
+;; ============================================================
+(display "=== User-defined HOF detection ===") (newline)
+
+;; detect-user-defined-hofs finds my-map as HOF with callback at position 0
+(let* ((src (string-append
+              "(define (my-map f lst) "
+              "  (if (null? lst) '() "
+              "      (cons (f (car lst)) (my-map f (cdr lst)))))"))
+       (exprs (read-all-expressions src))
+       (defs (extract-definitions exprs))
+       (hofs (detect-user-defined-hofs defs exprs)))
+  (assert-true "detect-user-defined-hofs: finds my-map"
+    (and (assq 'my-map hofs) #t))
+  (assert-equal "detect-user-defined-hofs: my-map callback at position 0"
+    0
+    (cdr (assq 'my-map hofs))))
+
+;; detect-user-defined-hofs: non-HOF function (no param in call position)
+(let* ((src "(define (add1 x) (+ x 1))")
+       (exprs (read-all-expressions src))
+       (defs (extract-definitions exprs))
+       (hofs (detect-user-defined-hofs defs exprs)))
+  (assert-equal "detect-user-defined-hofs: non-HOF returns empty"
+    '()
+    hofs))
+
+;; detect-user-defined-hofs: callback at position 1
+(let* ((src (string-append
+              "(define (my-fold init f lst) "
+              "  (if (null? lst) init "
+              "      (my-fold (f init (car lst)) f (cdr lst))))"))
+       (exprs (read-all-expressions src))
+       (defs (extract-definitions exprs))
+       (hofs (detect-user-defined-hofs defs exprs)))
+  (assert-true "detect-user-defined-hofs: callback at position 1"
+    (and (assq 'my-fold hofs)
+         (= 1 (cdr (assq 'my-fold hofs))))))
+
+;; collect-user-hof-callback-edges: finds callback passed to user-defined HOF
+(let* ((src (string-append
+              "(define (my-map f lst) "
+              "  (if (null? lst) '() "
+              "      (cons (f (car lst)) (my-map f (cdr lst))))) "
+              "(define (helper x) (+ x 1)) "
+              "(define (process data) (my-map helper data))"))
+       (exprs (read-all-expressions src))
+       (defs (extract-definitions exprs))
+       (hofs (detect-user-defined-hofs defs exprs))
+       (process-body (cdr (assq 'process defs)))
+       (edges (collect-user-hof-callback-edges process-body 'process hofs)))
+  (assert-true "collect-user-hof-callback-edges: finds helper via my-map"
+    (exists (lambda (e)
+              (and (eq? (car e) 'process)
+                   (eq? (cadr e) 'my-map)
+                   (eq? (caddr e) 'helper)))
+            edges)))
+
+;; ============================================================
+;; Test Group: User-defined HOF callback termination (positive)
+;; ============================================================
+(display "=== User-defined HOF callback: positive ===") (newline)
+
+;; Safe callback passed to user-defined HOF
+(assert-no-violations "user HOF with safe callback"
+  (check-source-termination
+    (string-append
+      "(define (my-map f lst) "
+      "  (if (null? lst) '() "
+      "      (cons (f (car lst)) (my-map f (cdr lst))))) "
+      "(define (safe-fn x) (+ x 1)) "
+      "(define (process data) (my-map safe-fn data))")))
+
+;; Terminating recursive callback passed to user-defined HOF
+(assert-no-violations "user HOF with terminating recursive callback"
+  (check-source-termination
+    (string-append
+      "(define (my-map f lst) "
+      "  (if (null? lst) '() "
+      "      (cons (f (car lst)) (my-map f (cdr lst))))) "
+      "(define (my-length xs) (if (null? xs) 0 (+ 1 (my-length (cdr xs))))) "
+      "(define (process data) (my-map my-length data))")))
+
+;; Built-in callback passed to user-defined HOF (not in defined-names)
+(assert-no-violations "user HOF with built-in callback"
+  (check-source-termination
+    (string-append
+      "(define (my-map f lst) "
+      "  (if (null? lst) '() "
+      "      (cons (f (car lst)) (my-map f (cdr lst))))) "
+      "(define (process data) (my-map car data))")))
+
+;; Inline lambda callback — no symbol resolution needed
+(assert-no-violations "user HOF with inline lambda callback"
+  (check-source-termination
+    (string-append
+      "(define (my-map f lst) "
+      "  (if (null? lst) '() "
+      "      (cons (f (car lst)) (my-map f (cdr lst))))) "
+      "(define (process data) (my-map (lambda (x) (+ x 1)) data))")))
+
+;; ============================================================
+;; Test Group: User-defined HOF callback termination (negative)
+;; ============================================================
+(display "=== User-defined HOF callback: negative ===") (newline)
+
+;; Non-terminating callback passed to user-defined HOF
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (my-map f lst) "
+            "  (if (null? lst) '() "
+            "      (cons (f (car lst)) (my-map f (cdr lst))))) "
+            "(define (dangerous-fn x) (dangerous-fn x)) "
+            "(define (process data) (my-map dangerous-fn data))"))))
+  (assert-true "user HOF with non-terminating callback: flagged"
+    (exists (lambda (v)
+              (eq? (termination-violation-kind v) 'hof-callback-not-terminating))
+            violations))
+  (assert-true "user HOF violation names process as caller"
+    (exists (lambda (v)
+              (and (eq? (termination-violation-kind v) 'hof-callback-not-terminating)
+                   (eq? (termination-violation-function v) 'process)))
+            violations)))
+
+;; Non-terminating HOF itself: only the HOF is flagged, not the callback path
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (bad-map f lst) (bad-map f lst)) "
+            "(define (safe-fn x) (+ x 1)) "
+            "(define (process data) (bad-map safe-fn data))"))))
+  ;; bad-map is flagged for no-decreasing-arg
+  (assert-true "non-terminating user HOF: HOF itself flagged"
+    (exists (lambda (v)
+              (and (eq? (termination-violation-kind v) 'no-decreasing-arg)
+                   (eq? (termination-violation-function v) 'bad-map)))
+            violations))
+  ;; safe-fn should NOT be flagged as hof-callback-not-terminating
+  ;; (bad-map is not proven terminating, so its callbacks are not checked)
+  (assert-true "non-terminating user HOF: callback NOT flagged"
+    (not (exists (lambda (v)
+                   (eq? (termination-violation-kind v) 'hof-callback-not-terminating))
+                 violations))))
+
+;; Mutually recursive non-terminating callback via user-defined HOF
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (my-for-each f lst) "
+            "  (if (null? lst) (void) "
+            "      (begin (f (car lst)) (my-for-each f (cdr lst))))) "
+            "(define (ping x) (pong x)) "
+            "(define (pong x) (ping x)) "
+            "(define (process data) (my-for-each ping data))"))))
+  (assert-true "user HOF with mutually recursive callback: flagged"
     (exists (lambda (v)
               (eq? (termination-violation-kind v) 'hof-callback-not-terminating))
             violations)))

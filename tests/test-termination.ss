@@ -798,7 +798,7 @@
     'f
     (termination-violation-function (car violations))))
 
-;; Increasing argument (not decreasing)
+;; Increasing argument with lower-bound base case (unsound: increasing away from zero)
 (let ((violations (check-source-termination
                     "(define (f n) (if (zero? n) 0 (f (+ n 1))))")))
   (assert-violation-count "direct recursion: increasing arg" 1 violations)
@@ -1509,6 +1509,117 @@
   (assert-true "mutually recursive non-terminating callback flagged"
     (exists (lambda (v)
               (eq? (termination-violation-kind v) 'hof-callback-not-terminating))
+            violations)))
+
+;; ============================================================
+;; Test Group: Vector index-based iteration (positive - no violations)
+;; ============================================================
+(display "=== Vector index iteration: positive ===") (newline)
+
+;; Named-let increasing to vector-length with when/< guard
+(assert-no-violations "named-let increasing index with when (< i (vector-length v))"
+  (check-source-termination
+    "(let loop ((i 0)) (when (< i (vector-length v)) (process (vector-ref v i)) (loop (+ i 1))))"))
+
+;; Named-let increasing to vector-length with if/>= base case
+(assert-no-violations "named-let increasing index with if (>= i (vector-length v))"
+  (check-source-termination
+    "(let loop ((i 0)) (if (>= i (vector-length v)) '() (begin (process (vector-ref v i)) (loop (+ i 1)))))"))
+
+;; Named-let increasing with (= i (vector-length v)) base case
+(assert-no-violations "named-let increasing index with (= i (vector-length v))"
+  (check-source-termination
+    "(let loop ((i 0)) (if (= i (vector-length v)) '() (begin (process (vector-ref v i)) (loop (+ i 1)))))"))
+
+;; Named-let decreasing from (- (vector-length v) 1) with when/>= guard
+(assert-no-violations "named-let decreasing from vector-length with when (>= i 0)"
+  (check-source-termination
+    "(let loop ((i (- (vector-length v) 1))) (when (>= i 0) (process (vector-ref v i)) (loop (- i 1))))"))
+
+;; Do-form with increasing index
+(assert-no-violations "do-form with increasing vector index"
+  (check-source-termination
+    "(do ((i 0 (+ i 1))) ((= i (vector-length v)) result) (process (vector-ref v i)))"))
+
+;; Do-form with increasing index and >= test
+(assert-no-violations "do-form with increasing index and >= test"
+  (check-source-termination
+    "(do ((i 0 (+ i 1))) ((>= i (vector-length v))) (process (vector-ref v i)))"))
+
+;; add1 variant
+(assert-no-violations "named-let with add1 step"
+  (check-source-termination
+    "(let loop ((i 0)) (if (= i (vector-length v)) '() (begin (process (vector-ref v i)) (loop (add1 i)))))"))
+
+;; fx+ variant
+(assert-no-violations "named-let with fx+ step"
+  (check-source-termination
+    "(let loop ((i 0)) (when (< i (vector-length v)) (process (vector-ref v i)) (loop (fx+ i 1))))"))
+
+;; (> i N) bound test variant
+(assert-no-violations "named-let with (> i (vector-length v)) base case"
+  (check-source-termination
+    "(let loop ((i 0)) (if (> i (vector-length v)) '() (begin (process (vector-ref v i)) (loop (+ i 1)))))"))
+
+;; Direct recursion with increasing index (LLM-generated SRFI-1 style - #298 scenario)
+(assert-no-violations "direct recursion: vector iteration with increasing index"
+  (check-source-termination
+    (string-append
+      "(define (my-vector-map f v i) "
+      "  (if (>= i (vector-length v)) "
+      "      '() "
+      "      (cons (f (vector-ref v i)) "
+      "            (my-vector-map f v (+ i 1)))))")))
+
+;; Direct recursion with = base case
+(assert-no-violations "direct recursion: vector iteration with = base case"
+  (check-source-termination
+    (string-append
+      "(define (vec-to-list v i) "
+      "  (if (= i (vector-length v)) "
+      "      '() "
+      "      (cons (vector-ref v i) "
+      "            (vec-to-list v (+ i 1)))))")))
+
+;; ============================================================
+;; Test Group: Vector index-based iteration (negative - violations)
+;; ============================================================
+(display "=== Vector index iteration: negative ===") (newline)
+
+;; Increasing index with no base-case test
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (bad-vec-iter v i) "
+            "  (bad-vec-iter v (+ i 1)))"))))
+  (assert-true "increasing index with no base case: flagged"
+    (exists (lambda (v)
+              (or (eq? (termination-violation-kind v) 'no-base-case)
+                  (eq? (termination-violation-kind v) 'no-decreasing-arg)))
+            violations)))
+
+;; Increasing index with unrelated bound variable
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (bad-bound v i) "
+            "  (if (>= x (vector-length v)) "
+            "      '() "
+            "      (bad-bound v (+ i 1))))"))))
+  (assert-true "increasing index with unrelated bound: flagged"
+    (> (length violations) 0)))
+
+;; No step expression at all (infinite loop)
+(let ((violations
+        (check-source-termination
+          (string-append
+            "(define (no-step v i) "
+            "  (if (= i (vector-length v)) "
+            "      '() "
+            "      (no-step v i)))"))))
+  (assert-true "no step expression: flagged as no-decreasing-arg"
+    (exists (lambda (v)
+              (eq? (termination-violation-kind v) 'no-decreasing-arg))
             violations)))
 
 ;; ============================================================

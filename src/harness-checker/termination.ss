@@ -592,6 +592,33 @@
                        (number? (caddr expr))
                        (> (caddr expr) 0))))))))
 
+  ;; Check if an expression is strictly increasing for the given variable.
+  ;; Increasing: (+ x 1), (add1 x), (fx+ x 1)
+  (define (increasing-expr? expr var)
+    (and (pair? expr)
+         (or
+           ;; (+ var <positive>) or (+ <positive> var)
+           (and (eq? (car expr) '+)
+                (pair? (cdr expr))
+                (pair? (cddr expr))
+                (or (and (eq? (cadr expr) var)
+                         (number? (caddr expr))
+                         (> (caddr expr) 0))
+                    (and (number? (cadr expr))
+                         (> (cadr expr) 0)
+                         (eq? (caddr expr) var))))
+           ;; (add1 var)
+           (and (eq? (car expr) 'add1)
+                (pair? (cdr expr))
+                (eq? (cadr expr) var))
+           ;; (fx+ var <positive>)
+           (and (eq? (car expr) 'fx+)
+                (pair? (cdr expr))
+                (eq? (cadr expr) var)
+                (pair? (cddr expr))
+                (number? (caddr expr))
+                (> (caddr expr) 0)))))
+
   ;; Check if an expression contains a recursive call to loop-name.
   ;; Skips quoted forms.
   (define (contains-call? expr loop-name)
@@ -689,6 +716,18 @@
                    (pair? (cddr expr))
                    (memq (caddr expr) vars)
                    (not (memq (cadr expr) vars)))
+              ;; (>= var N) where var reached or passed upper bound
+              (and (eq? (car expr) '>=)
+                   (pair? (cdr expr))
+                   (pair? (cddr expr))
+                   (memq (cadr expr) vars)
+                   (not (memq (caddr expr) vars)))
+              ;; (> var N) where var exceeded upper bound
+              (and (eq? (car expr) '>)
+                   (pair? (cdr expr))
+                   (pair? (cddr expr))
+                   (memq (cadr expr) vars)
+                   (not (memq (caddr expr) vars)))
               ;; (null? var)
               (and (eq? (car expr) 'null?)
                    (pair? (cdr expr))
@@ -701,6 +740,83 @@
                    (pair? (cdadr expr))
                    (memq (cadadr expr) vars)
                    #t))))))
+
+  ;; Check if an expression is an upper-bound base-case test for the given
+  ;; variables. These are tests where termination requires the variable to
+  ;; INCREASE toward the bound: (>= var N), (> var N), (= var N) where N
+  ;; is not zero/null. Used to pair with increasing-expr? for soundness.
+  (define (upper-bound-base-case-test? expr vars)
+    (and (pair? expr)
+         (or
+           ;; (>= var N) where var is a loop variable, N is not
+           (and (eq? (car expr) '>=)
+                (pair? (cdr expr))
+                (pair? (cddr expr))
+                (memq (cadr expr) vars)
+                (not (memq (caddr expr) vars)))
+           ;; (> var N) where var is a loop variable, N is not
+           (and (eq? (car expr) '>)
+                (pair? (cdr expr))
+                (pair? (cddr expr))
+                (memq (cadr expr) vars)
+                (not (memq (caddr expr) vars)))
+           ;; (= var N) where N is not a loop variable and not literal 0
+           (and (eq? (car expr) '=)
+                (pair? (cdr expr))
+                (pair? (cddr expr))
+                (or (and (memq (cadr expr) vars)
+                         (not (memq (caddr expr) vars))
+                         (not (eqv? (caddr expr) 0)))
+                    (and (not (memq (cadr expr) vars))
+                         (not (eqv? (cadr expr) 0))
+                         (memq (caddr expr) vars)))))))
+
+  ;; Check if the body has an upper-bound base case -- a conditional branch
+  ;; with an upper-bound test that does not contain a recursive call.
+  ;; Mirrors has-base-case? but only accepts upper-bound patterns.
+  (define (has-upper-bound-base-case? body-exprs loop-name vars)
+    (let ((found #f))
+      (define (walk expr)
+        (when (and (not found) (pair? expr))
+          (unless (eq? (car expr) 'quote)
+            (cond
+              ;; (if test consequent alternative)
+              ((eq? (car expr) 'if)
+               (when (and (pair? (cdr expr)) (pair? (cddr expr)))
+                 (let ((test (cadr expr))
+                       (consequent (caddr expr)))
+                   (when (and (upper-bound-base-case-test? test vars)
+                              (not (contains-call? consequent loop-name)))
+                     (set! found #t))
+                   (walk consequent)
+                   (when (pair? (cdddr expr)) (walk (cadddr expr))))))
+              ;; (cond clauses...)
+              ((eq? (car expr) 'cond)
+               (for-each
+                 (lambda (clause)
+                   (when (and (not found) (pair? clause) (pair? (cdr clause)))
+                     (let ((test (car clause)))
+                       (when (upper-bound-base-case-test? test vars)
+                         (let ((clause-body (cdr clause)))
+                           (unless (contains-call? clause-body loop-name)
+                             (set! found #t)))))))
+                 (cdr expr)))
+              ;; (when test body...) -- base case is the implicit else (not executing)
+              ((eq? (car expr) 'when)
+               (when (and (pair? (cdr expr))
+                          (upper-bound-base-case-test? (cadr expr) vars))
+                 (set! found #t)))
+              ;; (unless test body...) -- base case is when test is true
+              ((eq? (car expr) 'unless)
+               (when (and (pair? (cdr expr))
+                          (upper-bound-base-case-test? (cadr expr) vars))
+                 (set! found #t)))
+              (else
+               (when (pair? (car expr)) (walk (car expr)))
+               (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+                         (cdr expr)))))))
+      (for-each walk body-exprs)
+      found))
 
   ;; Check if the body has a base case -- a conditional branch that does
   ;; not contain a recursive call to loop-name.
@@ -899,7 +1015,7 @@
 
   ;; Like has-decreasing-call? but only accepts strictly decreasing patterns
   ;; (not monotonic/increasing). Used for direct recursion where increasing
-  ;; toward a base case is not a valid termination pattern.
+  ;; toward a base case requires separate direction-paired validation.
   ;; type-env is optional (defaults to '()).
   (define has-strictly-decreasing-call?
     (case-lambda
@@ -928,6 +1044,32 @@
                          (cdr expr)))))
          (for-each walk body-exprs)
          (and found-any all-decrease)))))
+
+  ;; Like has-strictly-decreasing-call? but only accepts strictly increasing
+  ;; patterns. Used for direct recursion where the variable increases toward
+  ;; an upper bound (e.g., vector index toward vector-length).
+  (define (has-strictly-increasing-call? body-exprs func-name vars)
+    (let ((found-any #f)
+          (all-increase #t))
+      (define (walk expr)
+        (when (and all-increase (pair? expr))
+          (unless (eq? (car expr) 'quote)
+            (when (eq? (car expr) func-name)
+              (set! found-any #t)
+              (let ((this-increases #f))
+                (let check-args ((args (cdr expr)) (params vars))
+                  (when (and (pair? args) (pair? params))
+                    (when (increasing-expr? (car args) (car params))
+                      (set! this-increases #t))
+                    (check-args (cdr args) (cdr params))))
+                (unless this-increases
+                  (set! all-increase #f))))
+            (when (pair? (car expr))
+              (walk (car expr)))
+            (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+                      (cdr expr)))))
+      (for-each walk body-exprs)
+      (and found-any all-increase)))
 
   ;; ---------------------------------------------------------------
   ;; Phase 5: Direct recursion analysis
@@ -1090,23 +1232,29 @@
                                          type-env)))
                  ;; Only analyze if we could extract formals
                  (when formals
-                   (cond
-                     ;; No formals or no strictly decreasing argument in any recursive call
-                     ((or (null? formals)
-                          (not (has-strictly-decreasing-call? body name formals local-type-env)))
-                      (add-violation! 'no-decreasing-arg name
-                        (or def-form (list 'define name '...))
-                        (string-append "recursive function \""
-                          (symbol->string name)
-                          "\" has no decreasing argument in recursive call(s)")))
+                   (let ((has-decreasing (has-strictly-decreasing-call? body name formals local-type-env))
+                         (has-increasing (and (not (null? formals))
+                                             (has-strictly-increasing-call? body name formals)
+                                             (has-upper-bound-base-case? body name formals))))
+                     (cond
+                       ;; No formals or no valid argument progression in any recursive call
+                       ;; Accept decreasing args (any base case) OR increasing args paired
+                       ;; with an upper-bound base case
+                       ((or (null? formals)
+                            (not (or has-decreasing has-increasing)))
+                        (add-violation! 'no-decreasing-arg name
+                          (or def-form (list 'define name '...))
+                          (string-append "recursive function \""
+                            (symbol->string name)
+                            "\" has no decreasing argument in recursive call(s)")))
 
-                     ;; Has decreasing args but no base case
-                     ((not (has-base-case? body name formals local-type-env))
-                      (add-violation! 'no-base-case name
-                        (or def-form (list 'define name '...))
-                        (string-append "recursive function \""
-                          (symbol->string name)
-                          "\" has no reachable base case"))))))))
+                       ;; Has valid progression but no base case at all
+                       ((not (has-base-case? body name formals local-type-env))
+                        (add-violation! 'no-base-case name
+                          (or def-form (list 'define name '...))
+                          (string-append "recursive function \""
+                            (symbol->string name)
+                            "\" has no reachable base case")))))))))
            sccs)
 
          (reverse violations)))))
@@ -1159,6 +1307,23 @@
                     #t)
                    (else
                     (check-formals (cdr formals)))))))))))
+
+  ;; Check if a call expression has at least one strictly increasing argument
+  ;; relative to the caller's formals. Used for increasing-toward-upper-bound
+  ;; patterns in mutual recursion.
+  (define (call-has-increasing-arg? call-expr caller-formals)
+    (let ((args (cdr call-expr)))
+      (let check-args ((remaining-args args))
+        (if (null? remaining-args)
+            #f
+            (let check-formals ((formals caller-formals))
+              (cond
+                ((null? formals)
+                 (check-args (cdr remaining-args)))
+                ((increasing-expr? (car remaining-args) (car formals))
+                 #t)
+                (else
+                 (check-formals (cdr formals)))))))))
 
   ;; Check if a test expression references any formal parameter of the SCC functions.
   ;; Used to ensure when/unless guards depend on changing state (not constant tests).
@@ -1289,6 +1454,7 @@
              (when (> (length scc) 1)
                (let* ((scc-names scc)
                       ;; Check if all intra-SCC call edges have a decreasing argument
+                      ;; OR increasing argument (increasing requires upper-bound base case)
                       (all-edges-decrease
                        (let check-members ((members scc-names))
                          (if (null? members)

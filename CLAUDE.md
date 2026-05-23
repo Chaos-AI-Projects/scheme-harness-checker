@@ -16,9 +16,10 @@ Ensures every function call in the program uses only approved procedures.
 
 Verifies that arguments passed to whitelisted functions satisfy known constraints.
 
-- **Constraint definitions**: Per-function rules specifying arity, argument types, and valid value ranges
-- **Analysis**: At each call site, statically check that arguments match the function's constraint spec
-- **Output**: Report violations (wrong arity, type mismatches, out-of-range values) with source location
+- **Constraint definitions**: Per-function rules specifying arity and argument types
+- **Analysis**: Two-pass pipeline — constraint inference from usage patterns, then forward type checking at call sites
+- **Output**: Report violations (wrong arity, type mismatches, contradictory type usage) with source location
+- **Note**: The original goal included "valid value ranges" (e.g., bounds checking for `vector-ref` indices). Value-range/interval analysis is not implemented — this is a deliberate scope decision given the complexity vs. benefit tradeoff for LLM-generated code. Arity and type checking provide the primary safety guarantees.
 
 ### 3. Termination Analysis (#230)
 

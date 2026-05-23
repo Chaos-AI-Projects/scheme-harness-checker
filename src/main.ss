@@ -6,7 +6,7 @@
 ;;
 ;; Flags:
 ;;   --no-termination       Disable termination analysis pass (enabled by default)
-;;   --termination-depth N  Skip call-graph analysis if program has more than N definitions
+;;   --termination-depth N  Block programs with more than N definitions (emits definition-limit-exceeded violation)
 ;;   --tool-schemas <path>  Load tool JSON Schemas from file, merge with type signatures
 ;;
 ;; Exit code 0 if no violations, 1 if violations found.

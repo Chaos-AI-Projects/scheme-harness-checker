@@ -1,0 +1,6 @@
+[project]
+name = "harness-checker"
+
+[[actions]]
+name = "copybara-sync"
+command = "scripts/copybara-sync.sh harness-checker"

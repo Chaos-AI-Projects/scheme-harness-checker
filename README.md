@@ -133,7 +133,6 @@ harness-checker/
 │   ├── test-type-env-builder.ss        # Type environment builder tests
 │   ├── sample-safe.ss                   # Example safe program
 │   └── sample-unsafe.ss                 # Example unsafe program
-├── CLAUDE.md                            # Project design docs
 └── README.md                            # This file
 ```
 

@@ -2635,6 +2635,33 @@
   (check-source-termination "(define (g x) ((lambda (h) (h h x 0)) (lambda (h n . m) (if (<= n 0) 0 (h h (- n 1) (car m))))))"))
 
 ;; ============================================================
+;; HC-10: list-tail descends only by a positive literal count
+;; ============================================================
+(newline)
+(display "=== HC-10: list-tail counts ===") (newline)
+;; (list-tail l 0) returns l, so crediting it as descent let this loop forever.
+(assert-equal "hc-10 definition with (list-tail l 0): rejected"
+  #f (null? (check-source-termination "(define (f l) (if (pair? l) (f (list-tail l 0)) 0))")))
+(assert-equal "hc-10 named let with (list-tail l 0): rejected"
+  #f (null? (check-source-termination "(let loop ((l '(1 2))) (if (pair? l) (loop (list-tail l 0)) 0))")))
+(assert-equal "hc-10 do-loop stepping by (list-tail l 0): rejected"
+  #f (null? (check-source-termination "(do ((l '(1 2) (list-tail l 0))) ((null? l) 0))")))
+(assert-equal "hc-10 count is a variable, not provably >= 1: rejected"
+  #f (null? (check-source-termination "(define (f l k) (if (pair? l) (f (list-tail l k) k) 0))")))
+(assert-equal "hc-10 count is a negative literal: rejected"
+  #f (null? (check-source-termination "(define (f l) (if (pair? l) (f (list-tail l -1)) 0))")))
+(assert-equal "hc-10 count is a fractional literal: rejected"
+  #f (null? (check-source-termination "(define (f l) (if (pair? l) (f (list-tail l 0.5)) 0))")))
+(assert-equal "hc-10 list-tail with no count: rejected"
+  #f (null? (check-source-termination "(define (f l) (if (pair? l) (f (list-tail l)) 0))")))
+(assert-no-violations "hc-10 definition with (list-tail l 1): accepted"
+  (check-source-termination "(define (f l) (if (pair? l) (f (list-tail l 1)) 0))"))
+(assert-no-violations "hc-10 definition with (list-tail l 2): accepted"
+  (check-source-termination "(define (f l) (if (pair? l) (f (list-tail l 2)) 0))"))
+(assert-no-violations "hc-10 do-loop stepping by (list-tail l 1): accepted"
+  (check-source-termination "(do ((l '(1 2) (list-tail l 1))) ((null? l) 0))"))
+
+;; ============================================================
 ;; Results
 ;; ============================================================
 (newline)

@@ -1089,7 +1089,7 @@
 
   ;; Check if an expression is a decreasing pattern for the given variable.
   ;; Numeric: (- x 1), (sub1 x), (fx- x 1)
-  ;; Structural: (cdr x), (cddr x), (list-tail x ...)
+  ;; Structural: (cdr x), (cddr x), (list-tail x k) for a literal k >= 1
   ;; Type-aware: when var-type is provided, also recognizes record accessor
   ;; calls that return a nullable self-referential type (linked-list traversal).
   ;; var-type is optional (defaults to #f when not available).
@@ -1127,10 +1127,16 @@
               (and (eq? (car expr) 'cddr)
                    (pair? (cdr expr))
                    (eq? (cadr expr) var))
-              ;; (list-tail var ...)
+              ;; (list-tail var k), k a positive exact integer literal.
+              ;; (list-tail var 0) returns var itself (HC-10).
               (and (eq? (car expr) 'list-tail)
                    (pair? (cdr expr))
-                   (eq? (cadr expr) var))
+                   (eq? (cadr expr) var)
+                   (pair? (cddr expr))
+                   (null? (cdddr expr))
+                   (integer? (caddr expr))
+                   (exact? (caddr expr))
+                   (> (caddr expr) 0))
               ;; (%cfa-element coll): an element of list coll, handed to a
               ;; HOF callback (HC-2). It decreases var when coll is var or
               ;; a decreasing expression of var. Lists are acyclic because

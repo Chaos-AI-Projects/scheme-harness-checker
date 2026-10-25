@@ -2435,6 +2435,53 @@
   (check-source-termination "(define (g) (let ((acc 0)) (do ((i 0 (+ i 1))) ((>= i 3) acc) (set! acc (+ acc i))))) (g)"))
 
 ;; ============================================================
+;; HC-7: named let applies the bound and guard rules of Phases 5 and 6
+;; ============================================================
+(display "=== HC-7: named-let bound and guard rules ===") (newline)
+
+(assert-rejected "hc-7 p9 bound (length l) grows under (cons 1 l): rejected"
+  "(define (f lst) (let loop ((i 0) (l lst)) (if (>= i (length l)) 0 (loop (+ i 1) (cons 1 l)))))")
+(assert-rejected "hc-7 p12 test in an earlier statement guards nothing: rejected"
+  "(define (f) (let loop ((i 0)) (if (>= i 10) 0 0) (loop (+ i 1))))")
+(assert-rejected "hc-7 ascent with no upper-bound test: rejected"
+  "(define (f n) (let loop ((i 0)) (if (= n 0) 0 (loop (+ i 1)))))")
+(assert-rejected "hc-7 descent tested in another branch: rejected"
+  "(define (f n) (let loop ((k n)) (if (= k 0) (loop (- k 1)) 0)))")
+(assert-rejected "hc-7 bound assigned by set!: rejected"
+  "(define (f n) (let loop ((i 0)) (if (>= i n) 0 (begin (set! n (+ n 1)) (loop (+ i 1))))))")
+(assert-rejected "hc-7 loop variable reset by set!: rejected"
+  "(define (f l) (let loop ((x l)) (if (null? x) 0 (begin (set! x l) (loop (cdr x))))))")
+(assert-no-violations "hc-7 ascent to (vector-length v): accepted"
+  (check-source-termination "(define (f v) (let loop ((i 0)) (if (>= i (vector-length v)) 0 (loop (+ i 1)))))"))
+(assert-no-violations "hc-7 ascent with l passed in place: accepted"
+  (check-source-termination "(define (f lst) (let loop ((i 0) (l lst)) (if (>= i (length l)) 0 (loop (+ i 1) l))))"))
+(assert-no-violations "hc-7 countdown under (= k 0): accepted"
+  (check-source-termination "(define (f n) (let loop ((k n)) (if (= k 0) 0 (loop (- k 1)))))"))
+(assert-no-violations "hc-7 countdown under when: accepted"
+  (check-source-termination "(define (f n) (let loop ((k n)) (when (> k 0) (loop (- k 1)))))"))
+(assert-no-violations "hc-7 list walk with accumulator: accepted"
+  (check-source-termination "(define (f x) (let loop ((l x) (acc 0)) (if (null? l) acc (loop (cdr l) (+ acc 1)))))"))
+(assert-no-violations "hc-7 nested loops, inner bound is the outer variable: accepted"
+  (check-source-termination "(define (f n) (let outer ((i 0)) (if (>= i n) 0 (let inner ((j 0)) (if (>= j i) (outer (+ i 1)) (inner (+ j 1)))))))"))
+
+(assert-rejected "hc-7 when (< i (length l)) with l grown: rejected"
+  "(define (f lst) (let loop ((i 0) (l lst)) (when (< i (length l)) (loop (+ i 1) (cons 1 l)))))")
+(assert-rejected "hc-7 when (> i 10) holds above the bound: rejected"
+  "(define (f) (let loop ((i 0)) (when (> i 10) (loop (+ i 1)))))")
+(assert-rejected "hc-7 when (< i 10) with descent: rejected"
+  "(define (f) (let loop ((i 0)) (when (< i 10) (loop (- i 1)))))")
+(assert-rejected "hc-7 when (< j 10) guards a different variable: rejected"
+  "(define (f j) (let loop ((i 0)) (when (< j 10) (loop (+ i 1)))))")
+(assert-no-violations "hc-7 when (> 10 i): accepted"
+  (check-source-termination "(define (f) (let loop ((i 0)) (when (> 10 i) (loop (+ i 1)))))"))
+(assert-no-violations "hc-7 when (not (>= i 10)): accepted"
+  (check-source-termination "(define (f) (let loop ((i 0)) (when (not (>= i 10)) (loop (+ i 1)))))"))
+(assert-no-violations "hc-7 direct recursion under when (< i 10): accepted"
+  (check-source-termination "(define (f i) (when (< i 10) (f (+ i 1))))"))
+(assert-rejected "hc-7 direct recursion under when (< i (length l)), l grown: rejected"
+  "(define (f i l) (when (< i (length l)) (f (+ i 1) (cons 1 l))))")
+
+;; ============================================================
 ;; Results
 ;; ============================================================
 (newline)

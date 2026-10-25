@@ -1601,24 +1601,18 @@
                   (for-each-sub (lambda (sub) (when (pair? sub) (walk sub current-env)))
                                 (cdr expr)))))))
 
-         ;; Every call to loop-name in its body has a monotonic argument.
-         ;; A call inside a closure that may run in a later iteration has
-         ;; only #f arguments, as in Phases 5 and 6.
-         (define (named-let-calls-decrease? expr loop-name vars env)
-           (let ((calls (collect-intra-scc-calls
-                          (cdddr expr) (list loop-name)
-                          (append (cons loop-name (binding-names (caddr expr)))
-                                  (or (names-shadowed-at exprs expr) '())))))
-             (and (pair? calls)
-                  (for-all
-                    (lambda (call)
-                      (let check ((args (cdr call)) (params vars))
-                        (and (pair? args) (pair? params)
-                             (or (and (car args)
-                                      (monotonic-expr? (car args) (car params)
-                                        (type-env-lookup env (car params))))
-                                 (check (cdr args) (cdr params))))))
-                    calls))))
+         ;; The loop's progress, judged as Phase 5 judges a directly
+         ;; recursive definition: a one-member SCC whose formals are the
+         ;; loop variables. So a numeric step counts only under a test
+         ;; that guards its call, and an ascent bound must be stable
+         ;; (HC-7). 'terminates, 'no-descent, 'unguarded or 'limit.
+         (define (named-let-progress expr loop-name vars env)
+           (let ((body (cdddr expr)))
+             (scc-size-change (list loop-name)
+                              (lambda (n) vars)
+                              (lambda (n) body)
+                              (lambda (n) env)
+                              exprs)))
 
          (define (check-named-let expr current-env)
            (let* ((loop-name (cadr expr))
@@ -1640,10 +1634,20 @@
 
              ;; Only analyze if the named-let actually recurses
              (when has-recursion?
+              (let ((progress (if (null? vars)
+                                  'no-descent
+                                  (named-let-progress expr loop-name vars current-env))))
                (cond
-                 ;; No variables or no decreasing argument in recursive calls
-                 ((or (null? vars)
-                      (not (named-let-calls-decrease? expr loop-name vars current-env)))
+                 ((eq? progress 'limit)
+                  (add-violation! 'size-change-limit loop-name expr
+                    (string-append "named-let \"" (symbol->string loop-name)
+                      "\" exceeds the size-change analysis limit")))
+
+                 ;; No variables, or some step that shrinks nothing or is
+                 ;; not guarded by a test that stops it
+                 ((or (eq? progress 'no-descent)
+                      (and (eq? progress 'unguarded)
+                           (has-base-case? body loop-name vars current-env)))
                   (add-violation! 'no-decreasing-arg loop-name expr
                     (string-append "named-let \"" (symbol->string loop-name)
                       "\" has no decreasing argument in recursive call(s)")))
@@ -1652,7 +1656,7 @@
                  ((not (has-base-case? body loop-name vars current-env))
                   (add-violation! 'no-base-case loop-name expr
                     (string-append "named-let \"" (symbol->string loop-name)
-                      "\" has no reachable base case")))))))
+                      "\" has no reachable base case"))))))))
 
          (for-each-sub (lambda (expr) (walk expr type-env)) exprs)
          (reverse violations)))))
@@ -1681,7 +1685,8 @@
   ;; decreasing-expr?, plus (car e) where e is var or decreases var. Pairs
   ;; are immutable here (set-car!/set-cdr! are not whitelisted), so car,
   ;; like cdr, shrinks the longest car/cdr path from a value. Size-change
-  ;; arcs only; named-let analysis keeps decreasing-expr?.
+  ;; arcs only, which named let now uses too (HC-7); do-loop analysis keeps
+  ;; decreasing-expr?.
   (define (sc-decreasing-expr? expr var var-type)
     (or (decreasing-expr? expr var var-type)
         (and (pair? expr)
@@ -1839,8 +1844,18 @@
     (let ((bounded (if (and (= (length scc-names) 1) (formals-of (car scc-names)))
                        (let* ((n (car scc-names))
                               (formals (proper-formals (formals-of n))))
+                         ;; Candidates: the upper-bound base cases, and the
+                         ;; upper-bound tests guarding each call (HC-7).
                          (bounded-formals
-                           (upper-bound-base-cases (body-of n) n formals)
+                           (apply append
+                             (upper-bound-base-cases (body-of n) n formals)
+                             (map (lambda (call)
+                                    (guard-upper-bound-pairs
+                                      (or (guards-at (body-of n)
+                                                     (hashtable-ref call-sites call #f))
+                                          '())
+                                      formals))
+                                  (calls-of n)))
                            formals (bound-ok?-of n)))
                        '())))
       (define (graphs guarded?)
@@ -2282,15 +2297,44 @@
                   (lower-stop-test? (car g) x bound-ok?)))
             guards))
 
+  ;; guards with each true test that keeps a variable below a bound
+  ;; rewritten as the false upper-bound test it equals: (< x c) known
+  ;; true becomes (>= x c) known false, as do (> c x) and (not t) for an
+  ;; upper-bound t. (<= x c) and (>= c x) become (> x c). So the true
+  ;; branch of (when (< i n) ...) guards ascent of i (HC-7).
+  (define (ascent-guards guards)
+    (map (lambda (g)
+           (let ((t (car g)))
+             (cond
+               ((not (and (cdr g) (pair? t) (list? t))) g)
+               ((and (eq? (car t) 'not) (= (length t) 2)) (cons (cadr t) #f))
+               ((not (= (length t) 3)) g)
+               ((eq? (car t) '<) (cons (list '>= (cadr t) (caddr t)) #f))
+               ((eq? (car t) '<=) (cons (list '> (cadr t) (caddr t)) #f))
+               ((eq? (car t) '>) (cons (list '>= (caddr t) (cadr t)) #f))
+               ((eq? (car t) '>=) (cons (list '> (caddr t) (cadr t)) #f))
+               (else g))))
+         guards))
+
+  ;; The (x . bound) pairs of the false upper-bound tests in guards.
+  (define (guard-upper-bound-pairs guards formals)
+    (fold-left
+      (lambda (acc g)
+        (if (and (not (cdr g)) (upper-bound-base-case-test? (car g) formals))
+            (cons (upper-bound-test-pair (car g) formals) acc)
+            acc))
+      '() (ascent-guards guards)))
+
   ;; Ascent of x toward its bound is strict at a call only under a false
-  ;; upper-bound test on x whose bound is stable (HC-4 I3).
+  ;; upper-bound test on x whose bound is stable (HC-4 I3), or the true
+  ;; test it equals (HC-7).
   (define (ascent-guarded? x guards bound-ok?)
     (exists (lambda (g)
               (and (not (cdr g))
                    (upper-bound-base-case-test? (car g) (list x))
                    (let ((pair (upper-bound-test-pair (car g) (list x))))
                      (and (eq? (car pair) x) (bound-ok? (cdr pair))))))
-            guards))
+            (ascent-guards guards)))
 
   ;; Every name some form in body-exprs binds, including its own defines.
   (define (body-binders body-exprs)

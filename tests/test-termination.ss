@@ -2559,6 +2559,68 @@
   (check-source-termination "(define (f l) (if (null? l) 0 (+ 1 (f (cdr l)))))"))
 
 ;; ============================================================
+;; HC-8: the false branch of a lower-pass test on a formal is a base case
+;; ============================================================
+
+(assert-no-violations "hc-8 (if (> n 0) <rec> 0): accepted"
+  (check-source-termination "(define (f n) (if (> n 0) (f (- n 1)) 0))"))
+(assert-no-violations "hc-8 (if (>= n 1) <rec> 0): accepted"
+  (check-source-termination "(define (f n) (if (>= n 1) (f (- n 1)) 0))"))
+(assert-no-violations "hc-8 (if (positive? n) <rec> 0): accepted"
+  (check-source-termination "(define (f n) (if (positive? n) (f (- n 1)) 0))"))
+(assert-no-violations "hc-8 mirrored (if (< 0 n) <rec> 0): accepted"
+  (check-source-termination "(define (f n) (if (< 0 n) (f (- n 1)) 0))"))
+(assert-no-violations "hc-8 recursion nested in the true branch: accepted"
+  (check-source-termination "(define (f n) (if (> n 0) (+ 1 (f (- n 1))) 0))"))
+(assert-no-violations "hc-8 accumulator returned on the false branch: accepted"
+  (check-source-termination "(define (f n acc) (if (> n 0) (f (- n 1) (* acc n)) acc))"))
+(assert-no-violations "hc-8 one-armed if: accepted"
+  (check-source-termination "(define (f n) (if (> n 0) (f (- n 1))))"))
+(assert-no-violations "hc-8 cond falling through after a pass test: accepted"
+  (check-source-termination "(define (f n) (cond ((> n 0) (f (- n 1)))))"))
+(assert-no-violations "hc-8 cond with else after a pass test: accepted"
+  (check-source-termination "(define (f n) (cond ((> n 0) (f (- n 1))) (else 0)))"))
+(assert-no-violations "hc-8 unless spelling, accepted before HC-8 too: accepted"
+  (check-source-termination "(define (f n) (unless (<= n 0) (f (- n 1))))"))
+(assert-no-violations "hc-8 named let: accepted"
+  (check-source-termination "(let loop ((n 10)) (if (> n 0) (loop (- n 1)) 0))"))
+(assert-no-violations "hc-8 mutual recursion: accepted"
+  (check-source-termination "(define (ev n) (if (> n 0) (od (- n 1)) #t)) (define (od n) (if (> n 0) (ev (- n 1)) #f))"))
+(assert-no-violations "hc-8 anonymous lambda recursion: accepted"
+  (check-source-termination "(define (g x) ((lambda (h) (h h x)) (lambda (h n) (if (> n 0) (h h (- n 1)) 0))))"))
+
+;; The false branch still has to stop. Each case descends structurally on l,
+;; so only the base-case rule can reject it.
+(define (hc-8-kinds src)
+  (map termination-violation-kind (check-source-termination src)))
+(assert-true "hc-8 false branch that recurses: no-base-case"
+  (and (memq 'no-base-case
+             (hc-8-kinds "(define (f l n) (if (> n 0) (f (cdr l) n) (f (cdr l) n)))"))
+       #t))
+(assert-true "hc-8 mutual pair whose false branches recurse: no-base-case"
+  (and (memq 'no-base-case
+             (hc-8-kinds "(define (ev l n) (if (> n 0) (od (cdr l) n) (od (cdr l) n))) (define (od l n) (if (> n 0) (ev (cdr l) n) (ev (cdr l) n)))"))
+       #t))
+(assert-true "hc-8 cond whose last clause is not the pass test: no-base-case"
+  (and (memq 'no-base-case
+             (hc-8-kinds "(define (f l n) (cond ((> n 0) (f (cdr l) n)) (#t (f (cdr l) n))))"))
+       #t))
+(assert-true "hc-8 cond fall-through whose test recurses: no-base-case"
+  (and (memq 'no-base-case
+             (hc-8-kinds "(define (f l n) (cond ((> n (f (cdr l) 0)) (f (cdr l) n))))"))
+       #t))
+(assert-true "hc-8 if whose pass test recurses: no-base-case"
+  (and (memq 'no-base-case
+             (hc-8-kinds "(define (f l n) (if (> n (f (cdr l) 0)) (f (cdr l) n)))"))
+       #t))
+(assert-equal "hc-8 pass test on a global, not a formal: rejected"
+  #f (null? (check-source-termination "(define m 3) (define (f n) (if (> m 0) (f (- n 1)) 0))")))
+;; Known limitation, matching (<= n m) on master: a bound that is another
+;; formal is not credited, although this program terminates.
+(assert-equal "hc-8 pass test against another formal: still rejected"
+  #f (null? (check-source-termination "(define (f n m) (if (> n m) (f (- n 1) m) 0))")))
+
+;; ============================================================
 ;; Results
 ;; ============================================================
 (newline)

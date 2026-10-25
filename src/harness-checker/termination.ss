@@ -1339,17 +1339,35 @@
                    (memq (cadadr expr) vars)
                    #t))))))
 
-  ;; A test whose FALSE branch is a base case: (pair? var), or (not T)
-  ;; where T is a base-case test.
+  ;; A test whose FALSE branch is a base case: (pair? var), (not T)
+  ;; where T is a base-case test, or a test such as (> var 0) that keeps
+  ;; var above a bound that is not itself in vars (HC-8).
   (define (negated-base-case-test? expr vars type-env)
     (and (pair? expr)
-         (pair? (cdr expr))
-         (null? (cddr expr))
-         (or (and (eq? (car expr) 'pair?)
-                  (memq (cadr expr) vars)
-                  #t)
-             (and (eq? (car expr) 'not)
-                  (base-case-test? (cadr expr) vars type-env)))))
+         (or (and (pair? (cdr expr))
+                  (null? (cddr expr))
+                  (or (and (eq? (car expr) 'pair?)
+                           (memq (cadr expr) vars)
+                           #t)
+                      (and (eq? (car expr) 'not)
+                           (base-case-test? (cadr expr) vars type-env))))
+             (let loop ((vs vars))
+               (and (pair? vs)
+                    (or (and (symbol? (car vs))
+                             (lower-pass-test? expr (car vs)
+                                               (lambda (c) (not (memq c vars)))))
+                        (loop (cdr vs))))))))
+
+  ;; The test of a cond's last clause when the cond has no else, so a
+  ;; false test falls through without recursing; #f otherwise (HC-8).
+  (define (cond-fall-through-test expr)
+    (let ((clauses (cdr expr)))
+      (and (list? clauses)
+           (pair? clauses)
+           (let ((c (list-ref clauses (- (length clauses) 1))))
+             (and (pair? c)
+                  (not (eq? (car c) 'else))
+                  (car c))))))
 
   ;; Check if an expression is an upper-bound base-case test for the given
   ;; variables. These are tests where termination requires the variable to
@@ -1466,10 +1484,11 @@
                                  (not (calls? consequent)))
                         (set! found #t))
                       ;; Or the test negates a base-case test and the
-                      ;; alternative doesn't recurse: (if (pair? x) <rec> <base>)
-                      (when (and alternative
-                                 (negated-base-case-test? test vars type-env)
-                                 (not (calls? alternative)))
+                      ;; alternative, if any, doesn't recurse:
+                      ;; (if (pair? x) <rec> <base>), (if (> n 0) <rec>)
+                      (when (and (negated-base-case-test? test vars type-env)
+                                 (not (calls? test))
+                                 (not (and alternative (calls? alternative))))
                         (set! found #t))
                       ;; Recurse into branches to find nested guards
                       (walk consequent)
@@ -1489,7 +1508,14 @@
                             (set! found #t))
                           ;; Recurse into clause bodies
                           (for-each-sub walk body))))
-                    (cdr expr)))
+                    (cdr expr))
+                  ;; A cond without else falls through when its last test
+                  ;; fails: (cond ((> n 0) <rec>)) (HC-8)
+                  (let ((test (cond-fall-through-test expr)))
+                    (when (and test
+                               (not (calls? test))
+                               (negated-base-case-test? test vars type-env))
+                      (set! found #t))))
 
                  ;; (when test body...) -- implicit base case: if test is false,
                  ;; loop returns void (doesn't recurse)
@@ -2582,9 +2608,9 @@
                      (when (and (not (contains-scc-call? test))
                                 (or (and (base-case-test? test vars)
                                          (not (contains-scc-call? consequent)))
-                                    (and alternative
-                                         (negated-base-case-test? test vars '())
-                                         (not (contains-scc-call? alternative)))))
+                                    (and (negated-base-case-test? test vars '())
+                                         (not (and alternative
+                                                   (contains-scc-call? alternative))))))
                        (set! found #t))
                      (walk consequent)
                      (when alternative (walk alternative)))))
@@ -2600,7 +2626,12 @@
                                     (not (contains-scc-call? body)))
                            (set! found #t))
                          (for-each-sub walk body))))
-                   (cdr expr)))
+                   (cdr expr))
+                 (let ((test (cond-fall-through-test expr)))
+                   (when (and test
+                              (not (contains-scc-call? test))
+                              (negated-base-case-test? test vars '()))
+                     (set! found #t))))
 
                 ;; (when test body...) -- if body contains a recursive call,
                 ;; the implicit else (when test is false) is a no-op base case.

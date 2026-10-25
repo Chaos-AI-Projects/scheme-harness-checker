@@ -9,7 +9,7 @@
 
 (define (factorial n)
   (letrec ((fact (lambda (n acc)
-                   (if (zero? n)
+                   (if (<= n 0)
                        acc
                        (fact (- n 1) (* acc n))))))
     (fact n 1)))

@@ -1076,7 +1076,9 @@
                     (list? bindings)
                     (not (do-steps-progress? do-expr assigned)))
                (add-violation! do-expr
-                 "do-form has no step that moves a tested variable toward the exit test"))))))
+                 (string-append
+                   "do-form has no step that moves a tested variable toward the exit test"
+                   (equality-stop-hint do-expr))))))))
 
       (for-each-sub walk exprs)
       (reverse violations)))
@@ -1650,7 +1652,8 @@
                            (has-base-case? body loop-name vars current-env)))
                   (add-violation! 'no-decreasing-arg loop-name expr
                     (string-append "named-let \"" (symbol->string loop-name)
-                      "\" has no decreasing argument in recursive call(s)")))
+                      "\" has no decreasing argument in recursive call(s)"
+                      (equality-stop-hint body))))
 
                  ;; Has decreasing args but no base case
                  ((not (has-base-case? body loop-name vars current-env))
@@ -2103,7 +2106,8 @@
                           (or def-form (list 'define name '...))
                           (string-append "recursive function \""
                             (symbol->string name)
-                            "\" has no decreasing argument in recursive call(s)")))
+                            "\" has no decreasing argument in recursive call(s)"
+                            (equality-stop-hint body))))
 
                        ;; Has valid progression but no base case at all
                        ((not (has-base-case? body name formals local-type-env))
@@ -2255,13 +2259,13 @@
         (for-each-sub (lambda (e) (walk e '())) body-exprs)
         #f)))
 
-  ;; A test whose truth stops numeric descent on x at bound c: (= x c),
-  ;; (zero? x), (< x c), (<= x c) and their mirrors. bound-ok? judges c.
+  ;; A test whose truth stops numeric descent on x at bound c: (< x c),
+  ;; (<= x c) and their mirrors. bound-ok? judges c. (= x c) and
+  ;; (zero? x) are not, since x can step past c from below (HC-6).
   (define (lower-stop-test? t x bound-ok?)
     (and (pair? t) (list? t)
          (case (car t)
-           ((zero?) (and (= (length t) 2) (eq? (cadr t) x)))
-           ((= < <=) (and (= (length t) 3) (eq? (cadr t) x)
+           ((< <=) (and (= (length t) 3) (eq? (cadr t) x)
                           (not (expr-references-any? (caddr t) (list x)))
                           (bound-ok? (caddr t))))
            ((>) (and (= (length t) 3) (eq? (caddr t) x)
@@ -2287,6 +2291,36 @@
                         (bound-ok? (cadr t))))
            ((not) (and (= (length t) 2) (lower-stop-test? (cadr t) x bound-ok?)))
            (else #f))))
+
+  ;; The note added to a rejected countdown whose stop is (= x c) or
+  ;; (zero? x): it names the lower stop (<= x c) that bounds x (HC-6).
+  ;; "" when expr has no such test on an x it also steps down.
+  (define (equality-stop-hint expr)
+    (define (show v) (call-with-string-output-port (lambda (p) (write v p))))
+    (define (data? e) (memq (car e) '(quote quasiquote)))
+    (define (descends? x)
+      (let walk ((e expr))
+        (and (pair? e) (list? e) (not (data? e))
+             (or (and (numeric-step? e) (decreasing-expr? e x))
+                 (exists walk e)))))
+    (call/cc
+      (lambda (k)
+        (define (hint test x c)
+          (when (descends? x)
+            (k (string-append "; " (show test) " does not bound "
+                              (symbol->string x) " from below, use "
+                              (show (list '<= x c))))))
+        (define (walk e)
+          (when (and (pair? e) (list? e) (not (data? e)))
+            (cond
+              ((and (eq? (car e) 'zero?) (= (length e) 2) (symbol? (cadr e)))
+               (hint e (cadr e) 0))
+              ((and (eq? (car e) '=) (= (length e) 3) (symbol? (cadr e))
+                    (number? (caddr e)))
+               (hint e (cadr e) (caddr e))))
+            (for-each walk e)))
+        (walk expr)
+        "")))
 
   ;; Numeric descent on x is strict at a call only under a guard that
   ;; stops it there (HC-4 I3, I4).
@@ -2713,7 +2747,8 @@
                             (or (find-definition-form exprs name)
                                 (list 'define name '...))
                             (string-append "mutual recursion group " group-str
-                              " has no decreasing argument across call edges")))
+                              " has no decreasing argument across call edges"
+                              (equality-stop-hint (find-definition-form exprs name)))))
                         scc-names)))
 
                    ;; All edges decrease but no base case in the group

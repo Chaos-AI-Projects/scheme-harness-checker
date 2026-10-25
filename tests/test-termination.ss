@@ -128,7 +128,7 @@
 
 (assert-no-violations "recursive function (terminating factorial)"
   (check-source-termination
-    "(define (factorial n) (if (= n 0) 1 (* n (factorial (- n 1)))))"))
+    "(define (factorial n) (if (<= n 0) 1 (* n (factorial (- n 1)))))"))
 
 (assert-no-violations "valid do loop"
   (check-source-termination
@@ -140,7 +140,7 @@
 
 (assert-no-violations "mutual recursion (valid even?/odd?)"
   (check-source-termination
-    "(define (even? n) (if (= n 0) #t (odd? (- n 1)))) (define (odd? n) (if (= n 0) #f (even? (- n 1))))"))
+    "(define (even? n) (if (<= n 0) #t (odd? (- n 1)))) (define (odd? n) (if (<= n 0) #f (even? (- n 1))))"))
 
 (assert-true "result is a list"
   (list? (check-source-termination "(define (f x) x)")))
@@ -516,15 +516,15 @@
 ;; Issue #273 test 1: decreasing arg + base case
 (assert-no-violations "named-let with decreasing arg and base case"
   (check-source-termination
-    "(let loop ((n 10)) (if (= n 0) 0 (loop (- n 1))))"))
+    "(let loop ((n 10)) (if (<= n 0) 0 (loop (- n 1))))"))
 
 (assert-no-violations "named-let with sub1 decrease"
   (check-source-termination
-    "(let loop ((n 10)) (if (zero? n) 0 (loop (sub1 n))))"))
+    "(let loop ((n 10)) (if (<= n 0) 0 (loop (sub1 n))))"))
 
 (assert-no-violations "named-let with fx- decrease"
   (check-source-termination
-    "(let loop ((n 10)) (if (= n 0) 0 (loop (fx- n 1))))"))
+    "(let loop ((n 10)) (if (<= n 0) 0 (loop (fx- n 1))))"))
 
 (assert-no-violations "named-let with cdr structural decrease"
   (check-source-termination
@@ -556,19 +556,19 @@
 
 (assert-no-violations "named-let with unless guard"
   (check-source-termination
-    "(let loop ((n 10)) (unless (= n 0) (display n) (loop (- n 1))))"))
+    "(let loop ((n 10)) (unless (<= n 0) (display n) (loop (- n 1))))"))
 
 (assert-no-violations "named-let with cond guard"
   (check-source-termination
-    "(let loop ((n 10)) (cond ((= n 0) 'done) (else (loop (- n 1)))))"))
+    "(let loop ((n 10)) (cond ((<= n 0) 'done) (else (loop (- n 1)))))"))
 
 (assert-no-violations "named-let with multiple args, one decreasing"
   (check-source-termination
-    "(let loop ((n 10) (acc 0)) (if (= n 0) acc (loop (- n 1) (+ acc n))))"))
+    "(let loop ((n 10) (acc 0)) (if (<= n 0) acc (loop (- n 1) (+ acc n))))"))
 
 (assert-no-violations "named-let nested inside define"
   (check-source-termination
-    "(define (sum-to n) (let loop ((i n) (acc 0)) (if (= i 0) acc (loop (- i 1) (+ acc i)))))"))
+    "(define (sum-to n) (let loop ((i n) (acc 0)) (if (<= i 0) acc (loop (- i 1) (+ acc i)))))"))
 
 ;; ============================================================
 ;; Test Group: Named-let analysis - no decreasing argument
@@ -635,7 +635,7 @@
 
 (assert-no-violations "nested valid named-lets"
   (check-source-termination
-    "(let outer ((i 10)) (if (= i 0) 0 (let inner ((j 5)) (if (= j 0) (outer (- i 1)) (inner (- j 1))))))"))
+    "(let outer ((i 10)) (if (<= i 0) 0 (let inner ((j 5)) (if (<= j 0) (outer (- i 1)) (inner (- j 1))))))"))
 
 (let ((violations (check-source-termination
                     "(let outer ((i 10)) (if (= i 0) 0 (let inner ((j 5)) (inner j))))")))
@@ -666,7 +666,7 @@
 ;; Verify that recognized base-case tests still work (consequent path)
 (assert-no-violations "if with recognized base-case test still passes"
   (check-source-termination
-    "(let loop ((n 10)) (if (= n 0) 0 (loop (- n 1))))"))
+    "(let loop ((n 10)) (if (<= n 0) 0 (loop (- n 1))))"))
 
 ;; ============================================================
 ;; Test Group: Conservative fix 2 - when/unless test must reference loop var
@@ -704,7 +704,7 @@
 
 (assert-no-violations "unless with test referencing loop var still passes"
   (check-source-termination
-    "(let loop ((n 10)) (unless (= n 0) (display n) (loop (- n 1))))"))
+    "(let loop ((n 10)) (unless (<= n 0) (display n) (loop (- n 1))))"))
 
 ;; ============================================================
 ;; Test Group: Conservative fix 3 - all recursive calls must decrease
@@ -722,7 +722,7 @@
 ;; All calls decrease → should pass
 (assert-no-violations "all calls decrease passes"
   (check-source-termination
-    "(let loop ((x 10)) (if (zero? x) 'done (if (even? x) (loop (- x 1)) (loop (- x 2)))))"))
+    "(let loop ((x 10)) (if (<= x 0) 'done (if (even? x) (loop (- x 1)) (loop (- x 2)))))"))
 
 ;; Single non-decreasing call → should be flagged (same as before)
 (let ((violations (check-source-termination
@@ -740,7 +740,7 @@
 ;; Issue #274 test 1: factorial with numeric decrease + base case
 (assert-no-violations "direct recursion: factorial passes"
   (check-source-termination
-    "(define (fact n) (if (zero? n) 1 (* n (fact (- n 1)))))"))
+    "(define (fact n) (if (<= n 0) 1 (* n (fact (- n 1)))))"))
 
 ;; Issue #274 test 3: structural decrease with cdr
 (assert-no-violations "direct recursion: list length passes"
@@ -765,22 +765,22 @@
 ;; define-lambda form
 (assert-no-violations "direct recursion: define-lambda factorial passes"
   (check-source-termination
-    "(define fact (lambda (n) (if (zero? n) 1 (* n (fact (- n 1))))))"))
+    "(define fact (lambda (n) (if (<= n 0) 1 (* n (fact (- n 1))))))"))
 
 ;; letrec-bound recursive function with decrease + base case
 (assert-no-violations "direct recursion: letrec with decrease + base passes"
   (check-source-termination
-    "(letrec ((f (lambda (n) (if (zero? n) 0 (f (- n 1)))))) (f 10))"))
+    "(letrec ((f (lambda (n) (if (<= n 0) 0 (f (- n 1)))))) (f 10))"))
 
 ;; sub1 decrease pattern
 (assert-no-violations "direct recursion: sub1 decrease passes"
   (check-source-termination
-    "(define (count n) (if (zero? n) 0 (count (sub1 n))))"))
+    "(define (count n) (if (<= n 0) 0 (count (sub1 n))))"))
 
 ;; cond-based base case
 (assert-no-violations "direct recursion: cond base case passes"
   (check-source-termination
-    "(define (f n) (cond ((zero? n) 0) (else (f (- n 1)))))"))
+    "(define (f n) (cond ((<= n 0) 0) (else (f (- n 1)))))"))
 
 ;; ============================================================
 ;; Test Group: Direct recursion analysis - violations
@@ -843,7 +843,7 @@
 ;; Mutual recursion handled by Phase 6 -- valid patterns should not produce violations here
 (assert-no-violations "direct recursion: mutual recursion handled by Phase 6"
   (check-source-termination
-    "(define (even? n) (if (= n 0) #t (odd? (- n 1)))) (define (odd? n) (if (= n 0) #f (even? (- n 1))))"))
+    "(define (even? n) (if (<= n 0) #t (odd? (- n 1)))) (define (odd? n) (if (<= n 0) #f (even? (- n 1))))"))
 
 ;; ============================================================
 ;; Test Group: Mutual recursion analysis - valid patterns (no violations)
@@ -854,30 +854,30 @@
 (assert-no-violations "mutual recursion: even?/odd? with decrease and base case"
   (check-source-termination
     (string-append
-      "(define (my-even? n) (if (= n 0) #t (my-odd? (- n 1)))) "
-      "(define (my-odd? n) (if (= n 0) #f (my-even? (- n 1))))")))
+      "(define (my-even? n) (if (<= n 0) #t (my-odd? (- n 1)))) "
+      "(define (my-odd? n) (if (<= n 0) #f (my-even? (- n 1))))")))
 
 ;; Three-function cycle all decreasing
 (assert-no-violations "mutual recursion: three-function cycle with decrease"
   (check-source-termination
     (string-append
-      "(define (a n) (if (= n 0) 'done (b (- n 1)))) "
-      "(define (b n) (if (= n 0) 'done (c (- n 1)))) "
-      "(define (c n) (if (= n 0) 'done (a (- n 1))))")))
+      "(define (a n) (if (<= n 0) 'done (b (- n 1)))) "
+      "(define (b n) (if (<= n 0) 'done (c (- n 1)))) "
+      "(define (c n) (if (<= n 0) 'done (a (- n 1))))")))
 
 ;; Both functions decrease on their respective calls
 (assert-no-violations "mutual recursion: both functions decrease before calling partner"
   (check-source-termination
     (string-append
-      "(define (ping n) (if (= n 0) 'done (pong (- n 1)))) "
-      "(define (pong n) (if (= n 0) 'done (ping (- n 1))))")))
+      "(define (ping n) (if (<= n 0) 'done (pong (- n 1)))) "
+      "(define (pong n) (if (<= n 0) 'done (ping (- n 1))))")))
 
 ;; letrec-bound mutual recursion
 (assert-no-violations "mutual recursion: letrec-bound even/odd"
   (check-source-termination
     (string-append
-      "(letrec ((ev (lambda (n) (if (= n 0) #t (od (- n 1))))) "
-      "         (od (lambda (n) (if (= n 0) #f (ev (- n 1)))))) "
+      "(letrec ((ev (lambda (n) (if (<= n 0) #t (od (- n 1))))) "
+      "         (od (lambda (n) (if (<= n 0) #f (ev (- n 1)))))) "
       "  (ev 10))")))
 
 ;; Structural decrease (cdr) in mutual recursion
@@ -962,7 +962,7 @@
 (let ((violations (check-source-termination
                     (string-append
                       ;; Safe: named-let with decrease and base case
-                      "(define (countdown n) (let loop ((i n)) (if (= i 0) 'done (loop (- i 1))))) "
+                      "(define (countdown n) (let loop ((i n)) (if (<= i 0) 'done (loop (- i 1))))) "
                       ;; Unsafe: direct recursion with no decrease
                       "(define (spin n) (spin n))"))))
   (assert-violation-count "mixed safe/unsafe: only unsafe flagged" 1 violations)
@@ -974,8 +974,8 @@
 (let ((violations (check-source-termination
                     (string-append
                       "(define (outer n) "
-                      "  (let ((inner (lambda (m) (if (= m 0) 'done (inner (- m 1)))))) "
-                      "    (if (= n 0) 'base (outer (- n 1)))))"))))
+                      "  (let ((inner (lambda (m) (if (<= m 0) 'done (inner (- m 1)))))) "
+                      "    (if (<= n 0) 'base (outer (- n 1)))))"))))
   ;; outer is safe (has base case and decreasing arg)
   ;; inner: lambda named 'inner' -- depends on whether letrec binding is detected
   ;; At minimum, outer should not be flagged
@@ -996,7 +996,7 @@
     (string-append
       "(define (factorial n) "
       "  (letrec ((fact (lambda (n acc) "
-      "                   (if (zero? n) acc (fact (- n 1) (* acc n)))))) "
+      "                   (if (<= n 0) acc (fact (- n 1) (* acc n)))))) "
       "    (fact n 1)))")))
 
 ;; 1f. Correctly flags known infinite loops
@@ -2022,10 +2022,10 @@
   "(define (f x) ((cdr (append (list 1) f)) x)) (f 1)")
 
 ;; Round 5 C3: numeric descent is trusted only in its own position.
-(assert-rejected "hc-2 r5c3: arg swap with (- x 1) under (= x 0): rejected"
-  "(define (f x y) (if (= x 0) 0 (f y (- x 1)))) (f -1 -1)")
+(assert-rejected "hc-2 r5c3: arg swap with (- x 1) under (<= x 0): rejected"
+  "(define (f x y) (if (<= x 0) 0 (f y (- x 1)))) (f 5 5)")
 (assert-no-violations "hc-2 r5c3: even/odd numeric mutual recursion: accepted"
-  (check-source-termination "(define (ev? n) (if (= n 0) #t (od? (- n 1)))) (define (od? n) (if (= n 0) #f (ev? (- n 1)))) (ev? 4)"))
+  (check-source-termination "(define (ev? n) (if (<= n 0) #t (od? (- n 1)))) (define (od? n) (if (<= n 0) #f (ev? (- n 1)))) (ev? 4)"))
 
 ;; Round 5 C4: a local binding is not the top-level one it shadows.
 (assert-rejected "hc-2 r5c4: letrec helper shadowing a terminating top-level helper: rejected"
@@ -2141,7 +2141,7 @@
 (assert-rejected "hc-2 r10i1: top-level case-lambda self-application, no base case: rejected"
   "(let ((cl (case-lambda ((s n) (s s (- n 1)))))) (cl cl 5))")
 (assert-no-violations "hc-2 r10i1: anonymous self-application with a base case: accepted"
-  (check-source-termination "(define (f k) ((lambda (h) (h h k)) (lambda (self n) (if (= n 0) 0 (self self (- n 1)))))) (f 5)"))
+  (check-source-termination "(define (f k) ((lambda (h) (h h k)) (lambda (self n) (if (<= n 0) 0 (self self (- n 1)))))) (f 5)"))
 
 ;; Round 10 I2: parameterize calls its parameter.
 (assert-rejected "hc-2 r10i2: parameterize hides a zero-argument call: rejected"
@@ -2161,9 +2161,9 @@
 (assert-no-violations "hc-2 r10i4: named let inside a top-level for-each lambda: accepted"
   (check-source-termination "(for-each (lambda (n) (let lp ((i n)) (when (> i 0) (display i) (lp (- i 1))))) (list 1 2 3))"))
 (assert-no-violations "hc-2 r10i4: named let inside a let-bound lambda: accepted"
-  (check-source-termination "(let ((count-down (lambda (n) (let lp ((i n) (acc '())) (if (= i 0) acc (lp (- i 1) (cons i acc))))))) (display (count-down 5)))"))
+  (check-source-termination "(let ((count-down (lambda (n) (let lp ((i n) (acc '())) (if (<= i 0) acc (lp (- i 1) (cons i acc))))))) (display (count-down 5)))"))
 (assert-no-violations "hc-2 r10i4: named let inside a map lambda in a top-level define: accepted"
-  (check-source-termination "(define lst (map (lambda (x) (let lp ((k x) (acc 1)) (if (= k 0) acc (lp (- k 1) (* acc k))))) (list 1 2 3))) (display lst)"))
+  (check-source-termination "(define lst (map (lambda (x) (let lp ((k x) (acc 1)) (if (<= k 0) acc (lp (- k 1) (* acc k))))) (list 1 2 3))) (display lst)"))
 (assert-no-violations "hc-2 r10i4: for-each lambda with a named let inside a top-level loop: accepted"
   (check-source-termination "(let loop ((i 0)) (when (< i 3) (for-each (lambda (j) (let inner ((k j)) (when (> k 0) (display k) (inner (- k 1))))) (list i)) (loop (+ i 1))))"))
 
@@ -2176,7 +2176,7 @@
 (assert-no-violations "hc-2 r10i5: internal define in an applied lambda with an argument: accepted"
   (check-source-termination "(display ((lambda (lst) (define (len l) (if (null? l) 0 (+ 1 (len (cdr l))))) (len lst)) (list 1 2 3)))"))
 (assert-no-violations "hc-2 r10i5: internal define in an applied thunk: accepted"
-  (check-source-termination "((lambda () (define (helper n) (if (= n 0) 0 (+ 1 (helper (- n 1))))) (display (helper 5))))"))
+  (check-source-termination "((lambda () (define (helper n) (if (<= n 0) 0 (+ 1 (helper (- n 1))))) (display (helper 5))))"))
 
 (assert-rejected "hc-2 r10i5: non-decreasing letrec in operator position: rejected"
   "(display ((letrec ((len (lambda (l) (if (null? l) 0 (+ 1 (len l)))))) len) (list 1 2 3)))")
@@ -2188,18 +2188,18 @@
   "(define (f x) (if (string? x) 0 (g x))) (define (g x) (f (- x 1))) (f 5)")
 (assert-rejected "hc-2 r10i6: mutual numeric descent on both edges guarded only by string?: rejected"
   "(define (f x) (if (string? x) 0 (g (- x 1)))) (define (g x) (f (- x 1))) (f 5)")
-(assert-no-violations "hc-2 r10i6: even/odd with a zero test: accepted"
-  (check-source-termination "(define (ev n) (if (= n 0) #t (od (- n 1)))) (define (od n) (if (= n 0) #f (ev (- n 1)))) (ev 4)"))
+(assert-no-violations "hc-2 r10i6: even/odd with a lower stop: accepted"
+  (check-source-termination "(define (ev n) (if (<= n 0) #t (od (- n 1)))) (define (od n) (if (<= n 0) #f (ev (- n 1)))) (ev 4)"))
 (assert-no-violations "hc-2 r10i6: mutual structural descent with a pair? test: accepted"
   (check-source-termination "(define (f x) (if (pair? x) (g (cdr x)) 0)) (define (g x) (f x)) (f (list 1 2))"))
 
 ;; Round 10 minor: a multi-operand - or + is not a unit step.
 (assert-rejected "hc-2 r10m: (- x 1 -5) is not descent: rejected"
-  "(define (f x) (if (= x 0) 0 (f (- x 1 -5)))) (f 3)")
+  "(define (f x) (if (<= x 0) 0 (f (- x 1 -5)))) (f 3)")
 (assert-rejected "hc-2 r10m: (+ x 1 -5) is not an increase: rejected"
   "(define (f x) (if (>= x 10) 0 (f (+ x 1 -5)))) (f 3)")
 (assert-no-violations "hc-2 r10m: (- x 1) is still descent: accepted"
-  (check-source-termination "(define (f x) (if (= x 0) 0 (f (- x 1)))) (f 3)"))
+  (check-source-termination "(define (f x) (if (<= x 0) 0 (f (- x 1)))) (f 3)"))
 
 ;; Round 11 C1: an empty spread set is still a spread, so a nested
 ;; apply's site arguments are not its procedure's arguments.
@@ -2221,7 +2221,7 @@
 (assert-rejected "hc-2 r11c3: set!-bound lambdas, g loops without a base case: rejected"
   "(define (run a) (let ((f #f) (g #f)) (set! f (lambda (n) (if (= n 0) 0 (g (- n 1))))) (set! g (lambda (n) (if (> n 100) (f (- n 1)) (g (- n 1))))) (f a))) (run 5)")
 (assert-no-violations "hc-2 r11c3: every cycle passes a base-case member: accepted"
-  (check-source-termination "(define (f n) (if (= n 0) 0 (g (- n 1)))) (define (g n) (if (= n 0) 1 (if (odd? n) (f (- n 1)) (g (- n 1))))) (f 5)"))
+  (check-source-termination "(define (f n) (if (<= n 0) 0 (g (- n 1)))) (define (g n) (if (<= n 0) 1 (if (odd? n) (f (- n 1)) (g (- n 1))))) (f 5)"))
 
 ;; Round 11 I1: quoted data, dotted or not, is never walked as code.
 (assert-no-violations "hc-2 r11i1: assoc on a quoted alist inside a for-each lambda: accepted"
@@ -2358,10 +2358,10 @@
   "(define (f i) (if (>= i 10) 0 0) (f (+ i 1))) (display (f 0))")
 (assert-rejected "hc-4 i3: one branch recurses with no bound test: rejected"
   "(define (f i j) (if (> j 0) (if (>= i 10) 0 (f (+ i 1) j)) (f (+ i 1) j))) (display (f 0 0))")
-(assert-rejected "hc-4 i3: zero test in a separate statement: rejected"
-  "(define (f n) (if (= n 0) 0 0) (f (- n 1))) (display (f 3))")
-(assert-no-violations "hc-4 i3: countdown guarded by its zero test: accepted"
-  (check-source-termination "(define (f n) (if (= n 0) 0 (f (- n 1)))) (display (f 3))"))
+(assert-rejected "hc-4 i3: lower stop in a separate statement: rejected"
+  "(define (f n) (if (<= n 0) 0 0) (f (- n 1))) (display (f 3))")
+(assert-no-violations "hc-4 i3: countdown guarded by its lower stop: accepted"
+  (check-source-termination "(define (f n) (if (<= n 0) 0 (f (- n 1)))) (display (f 3))"))
 (assert-no-violations "hc-4 i3: count-up guarded by unless: accepted"
   (check-source-termination "(define (f i) (unless (>= i 10) (f (+ i 1)))) (f 0)"))
 (assert-no-violations "hc-4 i3: countdown guarded by when (> n 0): accepted"
@@ -2369,8 +2369,8 @@
 (assert-no-violations "hc-4 i3: countdown in a cond else clause: accepted"
   (check-source-termination "(define (f n) (cond ((<= n 0) 0) (else (f (- n 1))))) (display (f 3))"))
 ;; I4: a base case on one formal does not stop descent on another.
-(assert-rejected "hc-4 i4: zero test on m, descent on n: rejected"
-  "(define (f n m) (if (= m 0) 0 (f (- n 1) m))) (display (f 3 1))")
+(assert-rejected "hc-4 i4: lower stop on m, descent on n: rejected"
+  "(define (f n m) (if (<= m 0) 0 (f (- n 1) m))) (display (f 3 1))")
 (assert-rejected "hc-4 i4: upper-bound test on n, descent on n: rejected"
   "(define (f n) (if (>= n 10) 0 (f (- n 1)))) (display (f 3))")
 
@@ -2378,12 +2378,12 @@
 (assert-true "hc-4 mutual guard against a formal: no crash"
   (list? (guard (e (#t #f)) (check-source-termination "(define (ev n m) (if (= n 0) #t (if (< n m) #t (od (- n 1) m)))) (define (od n m) (if (= n 0) #f (ev (- n 1) m))) (display (ev 10 3))"))))
 ;; HC-4 review: the anonymous-lambda path trusted unguarded numeric arcs.
-(assert-rejected "hc-4 anon i3: zero test in a separate statement: rejected"
-  "(define (k) ((lambda (s) (s s 3)) (lambda (self n) (if (= n 0) 0 0) (self self (- n 1))))) (display (k))")
-(assert-rejected "hc-4 anon i4: zero test on m, descent on n: rejected"
-  "(define (k) ((lambda (s) (s s 3 1)) (lambda (self n m) (if (= m 0) 0 (self self (- n 1) m))))) (display (k))")
+(assert-rejected "hc-4 anon i3: lower stop in a separate statement: rejected"
+  "(define (k) ((lambda (s) (s s 3)) (lambda (self n) (if (<= n 0) 0 0) (self self (- n 1))))) (display (k))")
+(assert-rejected "hc-4 anon i4: lower stop on m, descent on n: rejected"
+  "(define (k) ((lambda (s) (s s 3 1)) (lambda (self n m) (if (<= m 0) 0 (self self (- n 1) m))))) (display (k))")
 (assert-no-violations "hc-4 anon: guarded countdown: accepted"
-  (check-source-termination "(define (k) ((lambda (s) (s s 3)) (lambda (self n) (if (= n 0) 0 (self self (- n 1)))))) (display (k))"))
+  (check-source-termination "(define (k) ((lambda (s) (s s 3)) (lambda (self n) (if (<= n 0) 0 (self self (- n 1)))))) (display (k))"))
 
 ;; ============================================================
 ;; HC-5: a do-loop step must move a tested variable toward the exit test
@@ -2417,8 +2417,8 @@
   (check-source-termination "(do ((i 0 (+ i 1))) ((>= i 3) 0))"))
 (assert-no-violations "hc-5 mirrored upper bound: accepted"
   (check-source-termination "(do ((i 0 (+ i 1))) ((<= 3 i) 0))"))
-(assert-no-violations "hc-5 countdown to zero: accepted"
-  (check-source-termination "(do ((n 10 (- n 1))) ((zero? n) 0))"))
+(assert-no-violations "hc-5 countdown to (<= n 0): accepted"
+  (check-source-termination "(do ((n 10 (- n 1))) ((<= n 0) 0))"))
 (assert-no-violations "hc-5 countdown under a negated pass test: accepted"
   (check-source-termination "(do ((n 10 (sub1 n))) ((not (> n 0)) 0))"))
 (assert-no-violations "hc-5 mirrored lower bound: accepted"
@@ -2446,7 +2446,7 @@
 (assert-rejected "hc-7 ascent with no upper-bound test: rejected"
   "(define (f n) (let loop ((i 0)) (if (= n 0) 0 (loop (+ i 1)))))")
 (assert-rejected "hc-7 descent tested in another branch: rejected"
-  "(define (f n) (let loop ((k n)) (if (= k 0) (loop (- k 1)) 0)))")
+  "(define (f n) (let loop ((k n)) (if (<= k 0) (loop (- k 1)) 0)))")
 (assert-rejected "hc-7 bound assigned by set!: rejected"
   "(define (f n) (let loop ((i 0)) (if (>= i n) 0 (begin (set! n (+ n 1)) (loop (+ i 1))))))")
 (assert-rejected "hc-7 loop variable reset by set!: rejected"
@@ -2455,8 +2455,8 @@
   (check-source-termination "(define (f v) (let loop ((i 0)) (if (>= i (vector-length v)) 0 (loop (+ i 1)))))"))
 (assert-no-violations "hc-7 ascent with l passed in place: accepted"
   (check-source-termination "(define (f lst) (let loop ((i 0) (l lst)) (if (>= i (length l)) 0 (loop (+ i 1) l))))"))
-(assert-no-violations "hc-7 countdown under (= k 0): accepted"
-  (check-source-termination "(define (f n) (let loop ((k n)) (if (= k 0) 0 (loop (- k 1)))))"))
+(assert-no-violations "hc-7 countdown under (<= k 0): accepted"
+  (check-source-termination "(define (f n) (let loop ((k n)) (if (<= k 0) 0 (loop (- k 1)))))"))
 (assert-no-violations "hc-7 countdown under when: accepted"
   (check-source-termination "(define (f n) (let loop ((k n)) (when (> k 0) (loop (- k 1)))))"))
 (assert-no-violations "hc-7 list walk with accumulator: accepted"
@@ -2480,6 +2480,83 @@
   (check-source-termination "(define (f i) (when (< i 10) (f (+ i 1))))"))
 (assert-rejected "hc-7 direct recursion under when (< i (length l)), l grown: rejected"
   "(define (f i l) (when (< i (length l)) (f (+ i 1) (cons 1 l))))")
+
+;; ============================================================
+;; HC-6: (= n 0) and (zero? n) do not bound numeric descent from below
+;; ============================================================
+(display "=== HC-6: equality stops are not lower bounds ===") (newline)
+
+;; (f -1) steps past 0 forever, so an equality stop proves no descent.
+(assert-rejected "hc-6 (= x 0) countdown called with -1: rejected"
+  "(define (f x) (if (= x 0) 0 (f (- x 1)))) (f -1)")
+(assert-rejected "hc-6 (zero? x) countdown: rejected"
+  "(define (f x) (if (zero? x) 0 (f (- x 1)))) (f 3)")
+(assert-rejected "hc-6 factorial under (= n 0): rejected"
+  "(define (factorial n) (if (= n 0) 1 (* n (factorial (- n 1)))))")
+(assert-rejected "hc-6 define-lambda factorial under (zero? n): rejected"
+  "(define fact (lambda (n) (if (zero? n) 1 (* n (fact (- n 1))))))")
+(assert-rejected "hc-6 letrec countdown under (zero? n): rejected"
+  "(letrec ((f (lambda (n) (if (zero? n) 0 (f (- n 1)))))) (f 10))")
+(assert-rejected "hc-6 cond countdown under (zero? n): rejected"
+  "(define (f n) (cond ((zero? n) 0) (else (f (- n 1)))))")
+(assert-rejected "hc-6 countdown under unless (= n 0): rejected"
+  "(define (f n) (unless (= n 0) (f (- n 1))))")
+(assert-rejected "hc-6 countdown under when (not (= n 0)): rejected"
+  "(define (f n) (when (not (= n 0)) (f (- n 1))))")
+(assert-rejected "hc-6 (- n 2) can step over (= n 0): rejected"
+  "(define (f n) (if (= n 0) 0 (f (- n 2)))) (f 3)")
+(assert-rejected "hc-6 even/odd under (= n 0): rejected"
+  "(define (ev n) (if (= n 0) #t (od (- n 1)))) (define (od n) (if (= n 0) #f (ev (- n 1)))) (ev 4)")
+(assert-rejected "hc-6 letrec even/odd under (= n 0): rejected"
+  "(letrec ((ev (lambda (n) (if (= n 0) #t (od (- n 1))))) (od (lambda (n) (if (= n 0) #f (ev (- n 1)))))) (ev 10))")
+(assert-rejected "hc-6 named let under (= k 0): rejected"
+  "(define (f n) (let loop ((k n)) (if (= k 0) 0 (loop (- k 1)))))")
+(assert-rejected "hc-6 named let under (zero? n) with sub1: rejected"
+  "(let loop ((n 10)) (if (zero? n) 0 (loop (sub1 n))))")
+(assert-rejected "hc-6 anonymous self-application under (= n 0): rejected"
+  "(define (k) ((lambda (s) (s s 3)) (lambda (self n) (if (= n 0) 0 (self self (- n 1)))))) (display (k))")
+(assert-rejected "hc-6 do-loop countdown to (zero? n): rejected"
+  "(do ((n 10 (- n 1))) ((zero? n) 0))")
+(assert-rejected "hc-6 do-loop countdown to (= n 0): rejected"
+  "(do ((n 10 (- n 1))) ((= n 0) 0))")
+
+;; The rejection names the lower stop that fixes it.
+(define (reason-mentions? source text)
+  (exists (lambda (v)
+            (let ((r (termination-violation-reason v)) (n (string-length text)))
+              (let loop ((i 0))
+                (and (<= (+ i n) (string-length r))
+                     (or (string=? (substring r i (+ i n)) text)
+                         (loop (+ i 1)))))))
+          (check-source-termination source)))
+(assert-true "hc-6 direct recursion reason names (<= n 0)"
+  (reason-mentions? "(define (f n) (if (= n 0) 0 (f (- n 1))))" "(<= n 0)"))
+(assert-true "hc-6 zero? reason names (<= x 0)"
+  (reason-mentions? "(define (f x) (if (zero? x) 0 (f (- x 1))))" "(<= x 0)"))
+(assert-true "hc-6 named let reason names (<= k 0)"
+  (reason-mentions? "(define (f n) (let loop ((k n)) (if (= k 0) 0 (loop (- k 1)))))" "(<= k 0)"))
+(assert-true "hc-6 mutual recursion reason names (<= n 0)"
+  (reason-mentions? "(define (ev n) (if (= n 0) #t (od (- n 1)))) (define (od n) (if (= n 0) #f (ev (- n 1))))" "(<= n 0)"))
+(assert-true "hc-6 do-loop reason names (<= n 0)"
+  (reason-mentions? "(do ((n 10 (- n 1))) ((zero? n) 0))" "(<= n 0)"))
+(assert-true "hc-6 equality stop on a nonzero bound names (<= n 1)"
+  (reason-mentions? "(define (f n) (if (= n 1) 0 (f (- n 1))))" "(<= n 1)"))
+(assert-true "hc-6 a stop with no equality test gets no hint"
+  (not (reason-mentions? "(define (f n) (f (- n 1)))" "(<=")))
+(assert-true "hc-6 ascent to (= i 0) gets no hint"
+  (not (reason-mentions? "(define (f i) (if (= i 0) 0 (f (+ i 1)))) (f -5)" "(<=")))
+(assert-true "hc-6 do-loop ascent to (= i 0) gets no hint"
+  (not (reason-mentions? "(do ((i -5 (+ i 1))) ((= i 0) 0))" "(<=")))
+(assert-true "hc-6 equality test on a variable that does not descend gets no hint"
+  (not (reason-mentions? "(define (f n m) (if (= m 0) 0 (f (- n 1) m)))" "(<= m")))
+
+;; Lower stops still accepted.
+(assert-no-violations "hc-6 countdown under (< n 1): accepted"
+  (check-source-termination "(define (f n) (if (< n 1) 0 (f (- n 1)))) (f -1)"))
+(assert-no-violations "hc-6 countdown under (<= n 0) then (= n 5): accepted"
+  (check-source-termination "(define (f n) (cond ((<= n 0) 0) ((= n 5) 5) (else (f (- n 1)))))"))
+(assert-no-violations "hc-6 list walk under (null? l) unaffected: accepted"
+  (check-source-termination "(define (f l) (if (null? l) 0 (+ 1 (f (cdr l)))))"))
 
 ;; ============================================================
 ;; Results

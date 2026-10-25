@@ -763,7 +763,7 @@
                              (cfa-lambda-formals (lam (cadr e)))
                              numeric-strict?
                              (or (guards-at (cfa-lambda-body caller) site-expr) '())
-                             (make-bound-ok? (proper-formals (cfa-lambda-formals caller)) #f
+                             (make-bound-ok? (cfa-full-formals caller) #f
                                              (set!-targets exprs)
                                              (body-binders (cfa-lambda-body caller))))))
           ;; Numeric descent stops only at a base-case test, so every cycle
@@ -1745,6 +1745,11 @@
     (let ((targets (set!-targets body)))
       (map (lambda (x) (if (memq x targets) (gensym) x)) formals)))
 
+  ;; A cfa lambda's formals with its rest formal, kept apart by cfa.ss,
+  ;; restored as the tail: (a b . r), or r alone.
+  (define (cfa-full-formals l)
+    (append (cfa-lambda-formals l) (or (cfa-lambda-rest l) '())))
+
   ;; The proper prefix of a formals list; rest arguments get no arcs.
   (define (proper-formals formals)
     (if (pair? formals)
@@ -1814,10 +1819,14 @@
   ;; C1/C2: without this, an unconstrained formal or a growing bound
   ;; such as (length l) under (cons 1 l) carried the measure.
   ;; calls #f: no formal is stable (a mutual SCC or an anonymous cycle).
+  ;; formals may end in a rest formal, which is never stable: each call
+  ;; rebinds it to a fresh list (HC-9).
   (define (make-bound-ok? formals calls assigned local)
+    (define proper (proper-formals formals))
+    (define names (formal-names formals))
     (define (in-place? z)
       (and calls
-       (let ((i (let loop ((fs formals) (i 0))
+       (let ((i (let loop ((fs proper) (i 0))
                  (cond ((null? fs) #f) ((eq? (car fs) z) i) (else (loop (cdr fs) (+ i 1)))))))
         (for-all (lambda (call)
                    (let loop ((args (cdr call)) (k 0))
@@ -1827,8 +1836,8 @@
     (define (stable? e)
       (cond
         ((symbol? e) (and (not (memq e assigned))
-                          (if (memq e formals)
-                              (in-place? e)
+                          (if (memq e names)
+                              (and (memq e proper) (in-place? e))
                               (not (memq e local)))))
         ((pair? e) (or (eq? (car e) 'quote)
                        (and (memq (car e) pure-bound-ops)
@@ -1865,7 +1874,7 @@
     ;; A guard's bound must not move between calls. In a mutual SCC a
     ;; formal sits in different positions per member, so none is stable.
     (define (bound-ok?-of caller)
-      (let ((formals (proper-formals (or (formals-of caller) '()))))
+      (let ((formals (or (formals-of caller) '())))
         (make-bound-ok? formals
                         (if (= (length scc-names) 1) (calls-of caller) #f)
                         (set!-targets exprs)

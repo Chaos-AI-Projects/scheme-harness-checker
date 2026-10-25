@@ -2621,6 +2621,20 @@
   #f (null? (check-source-termination "(define (f n m) (if (> n m) (f (- n 1) m) 0))")))
 
 ;; ============================================================
+;; HC-9: a rest formal is never a stable guard bound
+;; ============================================================
+(newline)
+(display "=== HC-9: rest formals in guard bounds ===") (newline)
+;; Each call rebinds the rest formal to a fresh list, so (car m) can move
+;; between calls. A Chez run of this went 100,000 calls without stopping.
+(assert-equal "hc-9 anonymous cycle bounded by (car rest): rejected"
+  #f (null? (check-source-termination "(define (g x) ((lambda (h) (h h x 0)) (lambda (h n . m) (if (<= n (car m)) 0 (h h (- n 1) (- (car m) 2))))))")))
+(assert-equal "hc-9 definition bounded by (car rest): rejected"
+  #f (null? (check-source-termination "(define (f n . m) (if (<= n (car m)) 0 (f (- n 1) (- (car m) 2))))")))
+(assert-no-violations "hc-9 anonymous cycle with a constant bound: accepted"
+  (check-source-termination "(define (g x) ((lambda (h) (h h x 0)) (lambda (h n . m) (if (<= n 0) 0 (h h (- n 1) (car m))))))"))
+
+;; ============================================================
 ;; Results
 ;; ============================================================
 (newline)

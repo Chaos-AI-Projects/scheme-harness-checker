@@ -37,16 +37,54 @@ Detects programs that may not terminate (infinite loops / unbounded recursion) u
 
 1. **Do-loop analysis** — Checks `(do ...)` for non-trivial termination tests, step expressions, and exit-test variable references
 2. **Named-let analysis** — Checks for decreasing arguments (`cdr`, `sub1`, `- x 1`) and reachable base cases
-3. **Direct recursion** — SCC detection via Tarjan's algorithm, decreasing-argument verification, base case validation
-4. **Mutual recursion** — Multi-node SCC analysis requiring all intra-SCC edges to have decreasing args and at least one base case
+3. **Direct recursion** — SCC detection via Tarjan's algorithm, size-change termination, base case validation
+4. **Mutual recursion** — Multi-node SCC analysis, size-change termination across the whole SCC, and at least one base case. As in direct recursion, a base case is a branch guarded by a base-case test on a formal, such as `(= n 0)` or `(null? x)`. A member whose only group calls are list-HOF callbacks also has one, since the HOF stops at the empty list
 5. **HOF callback termination** — Checks callbacks passed to known-terminating HOFs (`map`, `for-each`, `filter`, `fold-left`, etc.)
 6. **User-defined HOF detection** — Infers which user-defined functions are HOFs and checks their callbacks
+
+The call graph comes from two sources. The first is call sites whose operator names a definition. The second is a 0CFA control-flow analysis (`cfa.ss`), which finds the lambdas that can reach every other call site. It models the calls built-ins make, including `parameterize`, which calls each parameter with no argument and with one. With it the checker sees recursion through a variable, an immediate lambda, a data structure or a built-in HOF:
+
+- `((lambda (x) (x x)) (lambda (x) (x x)))`
+- `(define (f g) (g g)) (f f)`
+- `(define (loop n) (let ((h loop)) (h n)))`
+
+Recursion is judged by size-change termination (`sct.ss`; Lee, Jones and Ben-Amram, 2001) rather than edge by edge. Each call in an SCC gets a graph of which arguments are no larger, or strictly smaller, than the caller's formals. The SCC is accepted when every idempotent graph in the composition closure has a strict self-arc. This accepts recursion through a user-written HOF, and structural arguments that swap but shrink every second call:
+
+- `(define (tree-sum t) (if (pair? t) (apply + (my-map tree-sum t)) t))`
+- `(define (f x y) (if (null? x) 0 (f y (cdr x))))`
+
+Three violation kinds come from this:
+
+- `unresolved-call` — the operator may be a value 0CFA cannot follow, such as a tool result or a record field
+- `no-decreasing-arg` on an anonymous lambda — a cycle made only of anonymous lambdas nested in one definition, with a call that decreases none of the calling lambda's formals
+- `no-base-case` on an anonymous lambda — such a cycle whose calls all decrease, but which passes through no member with a branch, guarded by a test on its formals, that makes none of the cycle's calls
+- `size-change-limit` — the closure exceeded 1,000 graphs for one SCC
+
+A recursion group needs a base case on every cycle, not just somewhere in the group. The members without a base case of their own must form no cycle, for named groups and anonymous ones alike, so a callee's `(null? l)` does not cover its caller's numeric self-loop.
 
 Uses a **can-prove model**: functions must be positively proven terminating rather than "not disproven". Configurable definition limit via `--termination-depth N` — programs with more definitions than the limit are blocked with a `definition-limit-exceeded` violation.
 
 ## Known Limitations
 
 - **No value-range analysis**: The original Parameter Validation goal (#229) specified "valid value ranges" as a constraint type (e.g., `(vector-ref v idx)` where `idx` must be `0 ≤ idx < (vector-length v)`). The current implementation delivers arity checking and type checking but does not track numeric value ranges or bounds. This is a deliberate scope decision — interval analysis on LLM-generated code adds significant complexity for limited practical benefit given the target use case. This could be revisited as a future enhancement if needed.
+
+- **Context-insensitive control flow**: 0CFA merges every call of a function into one set of abstract values, so it can invent a call edge and reject a terminating program. kCFA (k ≥ 1) would remove such edges. Three known programs are rejected this way:
+  - continuation-passing factorial, `(fact (- n 1) (lambda (v) (k (* n v))))`, where every continuation merges into `k`;
+  - `(fold-left compose inc (list inc inc))`, where every composed closure merges into one;
+  - recursion through any closure-returning combinator, such as `((compose inc go) (cdr l))` inside `go`, where `compose`'s returned closure may call any `g` ever passed to it.
+
+  kCFA is still not implemented, because no program in the test suite is rejected this way. That measurement covers the hand-written programs in `tests/` only, because no corpus of real LLM-generated programs is kept.
+- **Vector and string HOFs carry no decrease**: a callback of `vector-map`, `vector-for-each` or `string-for-each` is not treated as receiving smaller values, because `vector-set!` can make a vector contain itself. Recursion through them is rejected.
+- **`car` is "smaller" for size-change termination only**: size-change graphs count `(car x)` as strictly smaller than `x`, since pairs are immutable here. The do-loop and named-let phases keep the older, narrower notion.
+- **Numeric descent is trusted only in place**: `(- x 1)` counts as smaller than `x` only when passed back in `x`'s own argument position, as the per-edge rule did. A numeric swap such as `(f y (- x 1))` is rejected even under `(<= x 0)`, because the checker does not tie a base-case test to the call it guards. Structural descent (`cdr`, `car`, a list element) is well-founded and may cross positions.
+- **Bounded measure is single-function only**: an argument rising toward an upper bound is accepted in direct recursion, not across a mutual-recursion SCC. The bound must be one that cannot grow. It may use only literals, size functions such as `length`, `vector-length` and arithmetic, and no name that a `set!` assigns. Every formal it mentions must be passed back unchanged in its own position. So `(f (+ i 1) v)` under `(>= i (vector-length v))` is accepted, but `(f (+ i 1) (cons 1 l))` under `(>= i (length l))` is rejected. `when` never supplies an upper-bound base case, because it runs its body when the test holds.
+- **A numeric base case is assumed to be reached**: `(= n 0)` with `(- n 1)` is accepted, yet it loops from a negative start, and `(- n 2)` can step over 0. Excluding these needs the value-range analysis above.
+- **A closure's recursive call proves no descent**: inside a lambda that may run in a later activation, `(f (cdr x))` is measured against the `x` that built the closure, so its arguments count for nothing. Three kinds of lambda are exempt: one applied on the spot, one passed straight to a built-in HOF, and one bound by `let` or `let*` whose name is only ever called in place, as in `(let ((g (lambda () (f (cdr x))))) (g))`. A let-bound closure used any other way, such as passed as an argument or called from inside another lambda, is rejected.
+- **A named `let` called other than by its name fails closed**: Phase 4 sees a loop's recursion only as calls by its name, so passing the loop to an alias, a HOF or `apply` reports `named-let-alias` unless the loop calls no lambda.
+- **A top-level name defined twice is rejected**: a second top-level `define` rebinds the same variable, so earlier bodies call the later value. The analysis keys definitions by name and would judge only one of them, so it reports `duplicate-definition` instead.
+- **A local helper named like another definition is checked under its own name**: the termination analysis keys definitions by name, so before it runs, every internal `define`, `letrec` or `letrec*` binding whose name another definition also uses is renamed to `name~N` in its scope, as is any definition named like a synthesized `lambda@N` node. A violation in such a helper is reported as `name~N`. Before the rename, such a helper was also looked up in the top-level parameter types under the other definition's name.
+- **Recursion through a list HOF needs an explicit base case**: `(define (f x) (for-each f x))` terminates on any finite nested list, but it is rejected with `no-base-case`. So is a delegating wrapper used recursively, `(define (each l f) (for-each f l))` called as `(each rows (lambda (r) (each r display)))`. The HOF's empty list stops the walk, but the checker does not credit it as a base case, because an earlier exemption for it also covered cycles that never passed through the HOF.
+- **Case-lambda and rest-argument recursion fails closed**: a recursive definition whose formals are a `case-lambda` or a rest argument is rejected, because no single formals list can be measured. A definition that calls a top-level `case-lambda` clause or named `let` that is not a leaf reports `unresolved-call`, because no definition can carry that edge.
 
 ## Prerequisites
 
@@ -121,6 +159,8 @@ harness-checker/
 │       ├── json-schema.ss              # JSON Schema parser
 │       ├── schema-registry.ss          # Tool schema registry
 │       ├── termination.ss              # Pass 3: Termination analysis (6 phases)
+│       ├── cfa.ss                      # 0CFA control-flow analysis for termination
+│       ├── sct.ss                      # Size-change termination graphs and closure
 │       └── type-env-builder.ss         # Type environment builder for termination
 ├── data/
 │   ├── minimal-safe.txt                 # Default whitelist (163 entries)
@@ -130,6 +170,8 @@ harness-checker/
 │   ├── test-type-checker.ss            # Type inference tests
 │   ├── test-json-schema.ss             # JSON Schema parser tests
 │   ├── test-termination.ss             # Termination analysis tests
+│   ├── test-cfa.ss                     # 0CFA call-site table tests
+│   ├── test-sct.ss                     # Size-change graph tests
 │   ├── test-type-env-builder.ss        # Type environment builder tests
 │   ├── sample-safe.ss                   # Example safe program
 │   └── sample-unsafe.ss                 # Example unsafe program
@@ -155,6 +197,10 @@ scheme --libdirs ../src:<path-to-packrat-extended> --program test-termination.ss
 
 # Type environment builder tests
 scheme --libdirs ../src:<path-to-packrat-extended> --program test-type-env-builder.ss
+
+# 0CFA and size-change termination tests
+scheme --libdirs ../src:<path-to-packrat-extended> --program test-cfa.ss
+scheme --libdirs ../src:<path-to-packrat-extended> --program test-sct.ss
 ```
 
 ## Scope

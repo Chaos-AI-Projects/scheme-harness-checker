@@ -1798,6 +1798,524 @@
             violations)))
 
 ;; ============================================================
+;; HC-2: higher-order call edges (0CFA)
+;; ============================================================
+;; Each loop below reaches its callee through a variable, an immediate
+;; lambda or a built-in HOF, so a call graph built by name cannot see it.
+
+(define (assert-rejected test-name source)
+  (assert-true test-name
+    (> (length (check-source-termination source)) 0)))
+
+(assert-rejected "hc-2 omega: rejected"
+  "((lambda (x) (x x)) (lambda (x) (x x)))")
+
+(assert-rejected "hc-2 self-application through a formal: rejected"
+  "(define (f g) (g g)) (f f)")
+
+(assert-rejected "hc-2 alias through let: rejected"
+  "(define (loop n) (let ((h loop)) (h n))) (loop 3)")
+
+(assert-rejected "hc-2 recursion through map on a fresh list: rejected"
+  "(define (f x) (map f (list x))) (f 1)")
+
+(assert-rejected "hc-2 anonymous self-application inside a define: rejected"
+  "(define (f) (let ((g (lambda (h) (h h)))) (g g))) (f)")
+
+(assert-no-violations "hc-2 recursion through map on a formal: accepted"
+  (check-source-termination
+    "(define (tree-sum t) (if (not (pair? t)) t (apply + (map tree-sum t))))"))
+
+(assert-no-violations "hc-2 nested for-each with decreasing self-call: accepted"
+  (check-source-termination
+    (string-append
+      "(define (f n) "
+      "  (if (<= n 0) 0 "
+      "      (begin (for-each (lambda (x) (display x)) (list n)) "
+      "             (f (- n 1)))))")))
+
+;; fold-left hands its callback (acc elem): only the second formal receives
+;; an element of the list, so a decrease must be proven in that position.
+(assert-no-violations "hc-2 recursion through fold-left, element in its position: accepted"
+  (check-source-termination
+    "(define (count acc t) (if (not (pair? t)) (+ acc 1) (fold-left count acc t)))"))
+
+(assert-rejected "hc-2 recursion through fold-left, element in the accumulator slot: rejected"
+  "(define (f l acc) (if (not (pair? l)) acc (fold-left f acc l)))")
+
+;; Step 4: cycles made only of anonymous lambdas, and fail-closed calls.
+
+(assert-rejected "hc-2 omega with case-lambda clauses: rejected"
+  "((case-lambda ((x) (x x))) (case-lambda ((x) (x x))))")
+
+(assert-rejected "hc-2 two anonymous lambdas calling each other inside a define: rejected"
+  "(define (f) (let ((a (lambda (p q) (p q p)))) (a a a))) (f)")
+
+(assert-no-violations "hc-2 non-recursive immediate lambda: accepted"
+  (check-source-termination "((lambda (x) (+ x 1)) 2)"))
+
+(assert-true "hc-2 calling a value 0CFA cannot follow: unresolved-call"
+  (exists (lambda (v) (eq? (termination-violation-kind v) 'unresolved-call))
+          (check-source-termination "(define (f x) ((tool-get x f))) (f 1)")))
+
+;; Step 6 (size-change termination): shapes the per-edge rule cannot prove.
+
+(assert-no-violations "hc-2 sct: tree-sum through user-written my-map: accepted"
+  (check-source-termination
+    "(define (my-map g l) (if (null? l) '() (cons (g (car l)) (my-map g (cdr l))))) (define (tree-sum t) (if (pair? t) (apply + (my-map tree-sum t)) t))"))
+
+;; Numeric descent is trusted only in place (round 5 C3), so a numeric
+;; swap stays rejected, as on master. A structural swap is accepted.
+(assert-rejected "hc-2 sct: numeric argument swap: rejected, as on master"
+  "(define (f x y) (if (<= x 0) 0 (f y (- x 1))))")
+(assert-no-violations "hc-2 sct: structural argument swap, both shrink every two calls: accepted"
+  (check-source-termination "(define (f x y) (if (null? x) 0 (f y (cdr x))))"))
+
+(assert-no-violations "hc-2 sct: tree recursion on car and cdr: accepted"
+  (check-source-termination
+    "(define (leaves t) (if (not (pair? t)) 1 (+ (leaves (car t)) (leaves (cdr t)))))"))
+
+(assert-rejected "hc-2 sct: car of a non-decreasing argument: rejected"
+  "(define (f t) (if (pair? t) (f (car (cons t t))) 1))")
+
+(assert-rejected "hc-2 sct: argument swap with growth: rejected"
+  "(define (f x y) (if (<= x 0) 0 (f (+ y 1) (- x 1))))")
+
+;; A 7-cycle and a transposition generate all 5,040 permutations of the
+;; formals, so the closure passes the 1,000-graph cap and fails closed.
+(assert-true "hc-2 sct: closure over the cap: size-change-limit"
+  (exists (lambda (v) (eq? (termination-violation-kind v) 'size-change-limit))
+          (check-source-termination
+            "(define (f a b c d e g h) (if (<= a 0) 0 (if (<= b 0) (f b c d e g h a) (f b a c d e g h))))")))
+
+;; PR #729 review: false-accepts at f05b0b1, one must-reject case per repro.
+
+;; C1: built-ins reached through apply, a HOF or call-with-values.
+(assert-rejected "hc-2 c1: apply map: rejected"
+  "(define (f x) (apply map (list f (list x)))) (f 1)")
+(assert-rejected "hc-2 c1: apply apply: rejected"
+  "(define (f x) (apply apply (list f (list x)))) (f 1)")
+(assert-rejected "hc-2 c1: map apply: rejected"
+  "(define (f x) (map apply (list f) (list (list x)))) (f 1)")
+(assert-rejected "hc-2 c1: call-with-values into apply: rejected"
+  "(define (f x) (call-with-values (lambda () (values f (list x))) apply)) (f 1)")
+(assert-rejected "hc-2 c1: apply vector-set! then call the slot: rejected"
+  "(define (f x) (let ((v (make-vector 1 0))) (apply vector-set! (list v 0 f)) ((vector-ref v 0) x))) (f 1)")
+(assert-rejected "hc-2 c1: for-each vector-set! then call the slot: rejected"
+  "(define (f x) (let ((v (make-vector 1 0))) (for-each vector-set! (list v) (list 0) (list f)) ((vector-ref v 0) x))) (f 1)")
+
+;; C2: a call into a top-level case-lambda clause.
+(assert-rejected "hc-2 c2: top-level case-lambda argument calls back: rejected"
+  "(define (f g) (g g)) (f (case-lambda ((x) (f x))))")
+(assert-no-violations "hc-2 c2: top-level case-lambda leaf argument: accepted"
+  (check-source-termination "(define (f g) (g 1)) (f (case-lambda ((x) (+ x 1))))"))
+
+;; C3: an anonymous cycle that swaps a shrinking and a growing argument.
+(assert-rejected "hc-2 c3: anonymous self-application with argument swap: rejected"
+  "(define (h l) (let ((self (lambda (s x y) (if (null? x) 0 (s s (cons 1 y) (cdr x)))))) (self self l l))) (h (list 1))")
+(assert-rejected "hc-2 c3: anonymous self-application, car of a shadowed formal: rejected"
+  "(define (h l) (let ((self (lambda (s x) (if (null? x) 0 (let ((x (list x))) (s s (car x))))))) (self self l))) (h (list 1))")
+(assert-no-violations "hc-2 c3: anonymous self-application on cdr: accepted"
+  (check-source-termination "(define (h l) (let ((self (lambda (s x) (if (null? x) 0 (s s (cdr x)))))) (self self l))) (h (list 1))"))
+
+;; C4: a HOF bound to a name that shadows a different HOF.
+(assert-rejected "hc-2 c4: fold-left bound to the name map: rejected"
+  "(define (g acc e) (if (null? acc) 0 (f acc))) (define (f x) (let ((map fold-left)) (map g x (list 1)))) (f (list 1))")
+
+;; C5: car and element arcs under a shadowing let.
+(assert-rejected "hc-2 c5: car of a shadowed formal: rejected"
+  "(define (f x) (if (null? x) 0 (let ((x (list x))) (f (car x))))) (f (list 1))")
+(assert-rejected "hc-2 c5: for-each over a shadowed formal: rejected"
+  "(define (f x) (if (null? x) 0 (let ((x (list x))) (for-each f x)))) (f (list 1))")
+
+;; C6: case-lambda and rest-argument definitions.
+(assert-rejected "hc-2 c6: case-lambda define calls itself through an alias: rejected"
+  "(define f (case-lambda ((x) (let ((g f)) (g x))))) (f 1)")
+(assert-rejected "hc-2 c6: letrec case-lambda calls itself through an alias: rejected"
+  "(define (h) (letrec ((f (case-lambda ((x) (let ((g f)) (g x)))))) (f 1))) (h)")
+(assert-rejected "hc-2 c6: rest-argument define applies itself: rejected"
+  "(define f (lambda args (apply f args))) (f 1)")
+
+;; K1: a call-with-values consumer gets the producer's values, not the
+;; site's own arguments.
+(assert-rejected "hc-2 k1: call-with-values consumer is the caller: rejected"
+  "(define (th) (cons 1 th)) (define (loop x) (if (null? x) 0 (call-with-values (cdr x) loop))) (loop (th))")
+(assert-rejected "hc-2 k1: call-with-values as a for-each callback: rejected"
+  "(define (th) (cons 1 th)) (define (loop x) (if (null? x) 0 (for-each call-with-values (cdr x) (list loop)))) (loop (th))")
+
+;; K2: apply reached through a HOF or another apply is not (apply f a ... lst)
+;; at this site.
+(assert-rejected "hc-2 k2: apply as a map callback: rejected"
+  "(define (loop x) (if (null? x) 0 (begin (map apply (cdr x) (list (list x))) 0))) (loop (list 0 loop))")
+(assert-rejected "hc-2 k2: apply applied to apply: rejected"
+  "(define (loop x) (if (null? x) 0 (apply apply (car x) (list (list x))))) (loop (list loop))")
+
+;; K3: named lets inside a definition still carry anonymous cycles and
+;; aliased self-calls.
+(assert-rejected "hc-2 k3: self-application inside named lets: rejected"
+  "(define (f) ((lambda (x) (let lp () (x x))) (lambda (x) (let lp () (x x))))) (f)")
+(assert-rejected "hc-2 k3: named let calls itself through an alias: rejected"
+  "(define (g) (let loop ((n 10)) (if (= n 0) 0 (begin (loop (- n 1)) (let ((h loop)) (h n)))))) (g)")
+
+;; K4: a closure built in one activation and called from a later one.
+(assert-rejected "hc-2 k4: closure re-enters with a later activation's argument: rejected"
+  "(define (f x k) (cond ((null? x) 0) (k (k k)) (else (f (cdr x) (lambda (self) (f (cdr x) self)))))) (f (list 1 2 3) #f)")
+
+;; I1: a pair? guard is a base case for recursion through a built-in HOF.
+(assert-no-violations "hc-2 i1: tree-sum under a pair? guard via map: accepted"
+  (check-source-termination "(define (tree-sum t) (if (pair? t) (apply + (map tree-sum t)) t)) (tree-sum (list 1 (list 2 3)))"))
+(assert-no-violations "hc-2 i1: depth under a pair? guard via map: accepted"
+  (check-source-termination "(define (depth t) (if (pair? t) (+ 1 (apply max 0 (map depth t))) 0)) (depth (list 1 (list 2)))"))
+
+;; Round 3 C1: a cond clause is not an application, so a lambda in it
+;; escapes whatever its first element is.
+(assert-rejected "hc-2 r3c1: lambda after map in a cond clause: rejected"
+  "(define (f x k) (cond ((null? x) 0) (k (k k)) (else (f (cdr x) (cond (map (lambda (self) (f (cdr x) self)))))))) (f (list 1 2 3) #f)")
+(assert-rejected "hc-2 r3c1: lambda as a cond clause test: rejected"
+  "(define (f x k) (cond ((null? x) 0) (k (k k)) (else (f (cdr x) (cond ((lambda (self) (f (cdr x) self)))))))) (f (list 1 2 3) #f)")
+
+;; Round 3 C2: a named-let call inside a closure belongs to a later
+;; iteration.
+(assert-rejected "hc-2 r3c2: named-let closure re-enters with an earlier n: rejected"
+  "(define (g) (let lp ((n 10) (k #f)) (cond ((= n 0) 0) (k (k k)) (else (lp (- n 1) (lambda (self) (lp (- n 1) self))))))) (g)")
+
+;; Round 3 C3: a top-level define named like a built-in HOF is not it.
+(assert-rejected "hc-2 r3c3: named-let variable named map: rejected"
+  "(define (g) (let lp ((n 10) (k #f) (map (lambda (h l) h))) (cond ((= n 0) 0) (k (k k)) (else (lp (- n 1) (map (lambda (self) (lp (- n 1) self)) (list 1)) map))))) (g)")
+(assert-rejected "hc-2 r3c3: formal named map: rejected"
+  "(define (f x k map) (cond ((null? x) 0) (k (k k)) (else (f (cdr x) (map (lambda (self) (f (cdr x) self map)) x) map)))) (f (list 1 2 3) #f (lambda (h l) h))")
+(assert-rejected "hc-2 r3c3: user map returns its callback: rejected"
+  "(define (map g l) g) (define (f x k) (cond ((null? x) 0) (k (k k)) (else (f (cdr x) (map (lambda (self) (f (cdr x) self)) x))))) (f (list 1 2 3) #f)")
+
+;; Round 3 I1: a let-bound helper called in place runs in this activation.
+(assert-no-violations "hc-2 r3i1: let-bound helper called in place: accepted"
+  (check-source-termination "(define (f x) (let ((g (lambda () (f (cdr x))))) (if (null? x) 0 (g)))) (f (list 1 2))"))
+(assert-rejected "hc-2 r3i1: let-bound helper that escapes: rejected"
+  "(define (f x k) (let ((g (lambda (self) (f (cdr x) self)))) (cond ((null? x) 0) (k (k k)) (else (f (cdr x) g))))) (f (list 1 2 3) #f)")
+
+;; Round 4 C1: a HOF name bound around the definition is not the built-in.
+(assert-rejected "hc-2 r4c1: map bound by an enclosing let, mutual recursion: rejected"
+  "(define (outer) (let ((map (lambda (h l) h))) (define (f x k) (if (null? x) 0 (if k (k k) (g (cdr x) (map (lambda (self) (g (cdr x) self)) x))))) (define (g x k) (f x k)) (f (list 1 2 3) #f))) (outer)")
+(assert-rejected "hc-2 r4c1: map as a sibling internal define: rejected"
+  "(define (outer) (define (map g l) g) (define (f x k) (if (null? x) 0 (if k (k k) (f (cdr x) (map (lambda (self) (f (cdr x) self)) x))))) (f (list 1 2 3) #f)) (outer)")
+(assert-rejected "hc-2 r4c1: map as an enclosing lambda formal: rejected"
+  "((lambda (map) (define (f x k) (if (null? x) 0 (if k (k k) (f (cdr x) (map (lambda (self) (f (cdr x) self)) x))))) (f (list 1 2 3) #f)) (lambda (h l) h))")
+
+;; Round 4 C2: a wrapped lambda in operator position is still a definition.
+(assert-rejected "hc-2 r4c2: eta-expanded omega at top level: rejected"
+  "(((lambda (s) (lambda (n) ((s s) n))) (lambda (s) (lambda (n) ((s s) n)))) 1)")
+(assert-rejected "hc-2 r4c2: Y combinator: rejected"
+  "(define (Y f) ((lambda (x) (f (lambda (v) ((x x) v)))) (lambda (x) (f (lambda (v) ((x x) v)))))) ((Y (lambda (self) (lambda (n) (self n)))) 1)")
+(assert-rejected "hc-2 r4c2: eta-omega through a define: rejected"
+  "(define (app f) (f f)) ((app (lambda (s) (lambda (n) ((s s) n)))) 1)")
+(assert-rejected "hc-2 r4c2: letrec loop in operator position: rejected"
+  "((letrec ((lp (lambda (n) (lp n)))) lp) 1)")
+(assert-rejected "hc-2 r4c2: letrec loop in a letrec non-lambda init: rejected"
+  "(letrec ((v (list ((letrec ((lp (lambda (n) (lp n)))) lp) 1)))) v)")
+
+;; Round 5 C1/C2: append keeps every procedure it is given.
+(assert-rejected "hc-2 r5c1: procedure in apply append's spread: rejected"
+  "(define (f x) ((apply append (list '() f)) x)) (f 1)")
+(assert-rejected "hc-2 r5c1: procedure reaching append via call-with-values: rejected"
+  "(define (f x) ((call-with-values (lambda () (values (list) f)) append) x)) (f 1)")
+(assert-rejected "hc-2 r5c2: procedure in an improper append tail: rejected"
+  "(define (f x) ((cdr (append (list 1) f)) x)) (f 1)")
+
+;; Round 5 C3: numeric descent is trusted only in its own position.
+(assert-rejected "hc-2 r5c3: arg swap with (- x 1) under (= x 0): rejected"
+  "(define (f x y) (if (= x 0) 0 (f y (- x 1)))) (f -1 -1)")
+(assert-no-violations "hc-2 r5c3: even/odd numeric mutual recursion: accepted"
+  (check-source-termination "(define (ev? n) (if (= n 0) #t (od? (- n 1)))) (define (od? n) (if (= n 0) #f (ev? (- n 1)))) (ev? 4)"))
+
+;; Round 5 C4: a local binding is not the top-level one it shadows.
+(assert-rejected "hc-2 r5c4: letrec helper shadowing a terminating top-level helper: rejected"
+  "(define (helper n) (if (<= n 0) 0 (helper (- n 1)))) (define (f x) (letrec ((helper (lambda (g) (g g)))) (helper helper))) (f 1)")
+(assert-rejected "hc-2 r5c4: internal define shadowing a terminating top-level helper: rejected"
+  "(define (helper n) (if (<= n 0) 0 (helper (- n 1)))) (define (f x) (define (helper g) (g g)) (helper helper)) (f 1)")
+
+;; The local binding keeps its own scope: rebinding stops the rename.
+(assert-rejected "hc-2 r5c4: letrec* helper shadowing a terminating top-level helper: rejected"
+  "(define (helper n) (if (<= n 0) 0 (helper (- n 1)))) (define (f x) (letrec* ((helper (lambda (g) (g g)))) (helper helper))) (f 1)")
+(assert-rejected "hc-2 r5c4: two local helpers of one name, one loops: rejected"
+  "(define (f x) (define (helper l) (if (null? l) 0 (helper (cdr l)))) (helper x)) (define (g y) (define (helper k) (k k)) (helper helper)) (f (list 1)) (g 1)")
+(assert-no-violations "hc-2 r5c4: terminating local helper shadowing a top-level helper: accepted"
+  (check-source-termination "(define (helper n) (if (<= n 0) 0 (helper (- n 1)))) (define (f x) (define (helper l) (if (null? l) 0 (helper (cdr l)))) (helper x)) (f (list 1 2))"))
+(assert-no-violations "hc-2 r5c4: quoted and case-datum names are left alone: accepted"
+  (check-source-termination "(define (helper n) (if (<= n 0) 0 (helper (- n 1)))) (define (f x) (define (helper l) (if (null? l) 0 (helper (cdr l)))) (case (car '(helper)) ((helper) (helper x)) (else 0))) (f (list 1 2))"))
+;; Synthesized lambda@N node names cannot be captured by user definitions.
+(assert-rejected "hc-2 r5c4: a user lambda@N definition does not hide an anonymous loop: rejected"
+  "(define (lambda@2 n) (if (<= n 0) 0 (lambda@2 (- n 1)))) ((lambda (x) (x x)) (lambda (x) (x x)))")
+
+;; Round 6 I1: a top-level redefinition rebinds the same variable.
+(assert-rejected "hc-2 r6i1: card loop 2 behind a terminating definition of the same name: rejected"
+  "(define (f n) (if (= n 0) 0 (f (- n 1)))) (define (f g) (g g)) (f f)")
+(assert-rejected "hc-2 r6i1: redefinition by define of a lambda: rejected"
+  "(define (f n) (if (= n 0) 0 (f (- n 1)))) (define f (lambda (g) (g g))) (f f)")
+(assert-rejected "hc-2 r6i1: first-order redefinition inside a top-level begin: rejected"
+  "(define (f n) (if (= n 0) 0 (f (- n 1)))) (begin (define (f n) (f n))) (f 1)")
+(assert-rejected "hc-2 r6i1: set! of a top-level procedure to a loop: rejected"
+  "(define (f n) (if (= n 0) 0 (f (- n 1)))) (set! f (lambda (g) (g g))) (f f)")
+
+;; Round 5 I1: dynamic-wind thunks and cwv consumers run in this activation.
+(assert-no-violations "hc-2 r5i1: recursion inside a dynamic-wind thunk: accepted"
+  (check-source-termination "(define (f x) (if (null? x) 0 (dynamic-wind (lambda () 0) (lambda () (f (cdr x))) (lambda () 0)))) (f (list 1 2))"))
+(assert-no-violations "hc-2 r5i1: recursion inside a call-with-values consumer: accepted"
+  (check-source-termination "(define (f x) (if (null? x) 0 (call-with-values (lambda () (values 1 2)) (lambda (a b) (f (cdr x)))))) (f (list 1 2))"))
+(assert-rejected "hc-2 r5i1: user dynamic-wind returns its thunk: rejected"
+  "(define (dynamic-wind a b c) b) (define (f x k) (cond ((null? x) 0) (k (k k)) (else (f (cdr x) (dynamic-wind 0 (lambda (self) (f (cdr x) self)) 0))))) (f (list 1 2 3) #f)")
+
+;; Round 7 C1/C2: a top-level definition of a builtin's name, or of the
+;; synthesized element marker, is not the operator the checker trusts.
+(assert-rejected "hc-2 r7c1: top-level %cfa-element identity: rejected"
+  "(define (%cfa-element x) x) (define (f x) (if (null? x) 0 (f (%cfa-element x)))) (f (list 1))")
+(assert-rejected "hc-2 r7c2: top-level car identity: rejected"
+  "(define (car x) x) (define (f x) (if (null? x) 0 (f (car x)))) (f (list 1))")
+(assert-rejected "hc-2 r7c2: top-level car as define of a lambda: rejected"
+  "(define car (lambda (y) y)) (define (f x) (if (null? x) 0 (f (car x)))) (f (list 1))")
+(assert-rejected "hc-2 r7c2: top-level cdr identity (pre-existing): rejected"
+  "(define (cdr x) x) (define (f x) (if (null? x) 0 (f (cdr x)))) (f (list 1))")
+(assert-rejected "hc-2 r7c2: top-level - returning its first argument (pre-existing): rejected"
+  "(define (- a b) a) (define (f x) (if (= x 0) 0 (f (- x 1)))) (f 5)")
+(assert-no-violations "hc-2 r7c2: a user my-car over the builtin car: accepted"
+  (check-source-termination "(define (my-car p) (car p)) (define (f x) (if (null? x) 0 (f (cdr x)))) (f (list 1 2))"))
+
+;; Round 7 C3: a formal that is set! in the body carries no size-change arc.
+(assert-rejected "hc-2 r7c3: set! of the formal before (car x): rejected"
+  "(define (f x) (if (null? x) 0 (begin (set! x (list x)) (f (car x))))) (f (list 1))")
+(assert-rejected "hc-2 r7c3: set! of the formal before (cdr x) (pre-existing): rejected"
+  "(define (f x) (if (null? x) 0 (begin (set! x (cons 1 x)) (f (cdr x))))) (f (list 1))")
+(assert-rejected "hc-2 r7c3: set! of an anonymous lambda's formal: rejected"
+  "((lambda (self x) (self self x)) (lambda (self x) (if (null? x) 0 (begin (set! x (cons 1 x)) (self self (cdr x))))) (list 1))")
+(assert-no-violations "hc-2 r7c3: set! of a different local keeps the formal's arc: accepted"
+  (check-source-termination "(define (f x) (let ((n 0)) (if (null? x) n (begin (set! n 1) (f (cdr x)))))) (f (list 1 2))"))
+
+;; Round 8 C1: car or %cfa-element bound by an enclosing local binder is not descent.
+(assert-rejected "hc-2 r8c1: enclosing let rebinds the descent operator: rejected"
+  "(define (g) (let ((car (lambda (y) y))) (define (f x) (if (null? x) 0 (f (car x)))) (f (list 1)))) (g)")
+(assert-rejected "hc-2 r8c1: enclosing let* rebinds the descent operator: rejected"
+  "(define (g) (let* ((car (lambda (y) y))) (letrec ((f (lambda (x) (if (null? x) 0 (f (car x)))))) (f (list 1))))) (g)")
+(assert-rejected "hc-2 r8c1: enclosing letrec rebinds the descent operator: rejected"
+  "(define (g) (letrec ((car (lambda (y) y))) (define (f x) (if (null? x) 0 (f (car x)))) (f (list 1)))) (g)")
+(assert-rejected "hc-2 r8c1: enclosing let-values rebinds the descent operator: rejected"
+  "(define (g) (let-values (((car) (values (lambda (y) y)))) (define (f x) (if (null? x) 0 (f (car x)))) (f (list 1)))) (g)")
+(assert-rejected "hc-2 r8c1: enclosing named-let variable rebinds the descent operator: rejected"
+  "(define (g) (let lp ((car (lambda (y) y)) (i 0)) (define (f x) (if (null? x) 0 (f (car x)))) (f (list 1)))) (g)")
+(assert-rejected "hc-2 r8c1: enclosing sibling internal define rebinds the descent operator: rejected"
+  "(define (g) (define (car y) y) (define (f x) (if (null? x) 0 (f (car x)))) (f (list 1))) (g)")
+(assert-rejected "hc-2 r8c1: enclosing do variable rebinds the descent operator: rejected"
+  "(define (g) (do ((car (lambda (y) y) car) (i 0 (+ i 1))) ((= i 1) 0) (letrec ((f (lambda (x) (if (null? x) 0 (f (car x)))))) (f (list 1))))) (g)")
+(assert-rejected "hc-2 r8c1: enclosing let, mutual recursion rebinds the descent operator: rejected"
+  "(define (g) (let ((car (lambda (y) y))) (define (f x) (if (null? x) 0 (h x))) (define (h x) (f (car x))) (f (list 1)))) (g)")
+(assert-rejected "hc-2 r8c1: enclosing let, %cfa-element rebinds the descent operator: rejected"
+  "(define (g) (let ((%cfa-element (lambda (y) y))) (define (f x) (if (null? x) 0 (f (%cfa-element x)))) (f (list 1)))) (g)")
+(assert-rejected "hc-2 r8c1: enclosing let, cdr (pre-existing) rebinds the descent operator: rejected"
+  "(define (g) (let ((cdr (lambda (y) y))) (define (f x) (if (null? x) 0 (f (cdr x)))) (f (list 1)))) (g)")
+(assert-no-violations "hc-2 r8c1: an enclosing let of an unrelated name keeps (cdr x) descent: accepted"
+  (check-source-termination "(define (g) (let ((k 1)) (define (f x) (if (null? x) k (f (cdr x)))) (f (list 1 2)))) (g)"))
+(assert-no-violations "hc-2 r8c1: a formal named list is renamed, descent on another formal still counts: accepted"
+  (check-source-termination "(define (f list x) (if (null? x) list (f list (cdr x)))) (f 0 (list 1 2))"))
+
+;; Round 9 C1: a local binder named after a syntactic keyword hides a call.
+(assert-rejected "hc-2 r9c1: let-bound quote hides the real recursive call: rejected"
+  "(define (f x y) (let ((quote (lambda (v) v))) (if (null? x) (quote (f x y)) (f y (cdr x))))) (f (list 1) (list 2))")
+(assert-rejected "hc-2 r9c1: formal named quote hides the real recursive call: rejected"
+  "(define (f x y quote) (if (null? x) (quote (f x y quote)) (f y (cdr x) quote))) (f (list 1) (list 2) (lambda (v) v))")
+(assert-rejected "hc-2 r9c1: internal define named quote hides the real recursive call: rejected"
+  "(define (f x y) (define (quote v) v) (if (null? x) (quote (f x y)) (f y (cdr x)))) (f (list 1) (list 2))")
+(assert-rejected "hc-2 r9c1: let-bound if hides the real recursive call: rejected"
+  "(define (f x) (let ((if (lambda (a b c) c))) (if (null? x) 0 (f x)))) (f (list 1))")
+
+;; Round 9 I1's exemption (a HOF's empty list as base case) was deleted in
+;; round 11 (C2): it also covered cycles that never passed through the HOF.
+;; The delegating wrapper is a documented false rejection (README).
+(assert-rejected "hc-2 r9i1: delegating for-each wrapper used nested: rejected (README limitation)"
+  "(define (each l f) (for-each f l)) (each '((1 2) (3)) (lambda (r) (each r display)))")
+(assert-rejected "hc-2 r9i1: a direct call beside the callback still needs a base case: rejected"
+  "(define (each l f) (for-each f l) (each (cdr l) f)) (each '((1 2) (3)) (lambda (r) (each r display)))")
+(assert-rejected "hc-2 r9i1: mutual recursion with no callback still needs a base case: rejected"
+  "(define (f x) (g (cdr x))) (define (g x) (f (cdr x))) (f (list 1 2))")
+
+;; Round 10 I1: an anonymous cycle still needs a base case.
+(assert-rejected "hc-2 r10i1: self-application inside a define, no base case: rejected"
+  "(define (f k) ((lambda (h) (h h k)) (lambda (self n) (self self (- n 1))))) (f 5)")
+(assert-rejected "hc-2 r10i1: top-level case-lambda self-application, no base case: rejected"
+  "(let ((cl (case-lambda ((s n) (s s (- n 1)))))) (cl cl 5))")
+(assert-no-violations "hc-2 r10i1: anonymous self-application with a base case: accepted"
+  (check-source-termination "(define (f k) ((lambda (h) (h h k)) (lambda (self n) (if (= n 0) 0 (self self (- n 1)))))) (f 5)"))
+
+;; Round 10 I2: parameterize calls its parameter.
+(assert-rejected "hc-2 r10i2: parameterize hides a zero-argument call: rejected"
+  "(define (f k) (parameterize ((k 1)) 0)) (define (k0) (f k0)) (f k0)")
+(assert-rejected "hc-2 r10i2: parameterize calls its parameter with one argument: rejected"
+  "(define (f k) (parameterize ((k 1)) 0)) (define (k1 x) (f k1)) (f k1)")
+(assert-no-violations "hc-2 r10i2: parameterize over a non-recursive case-lambda: accepted"
+  (check-source-termination "(define p (case-lambda (() 0) ((x) x))) (parameterize ((p 1)) (display 2))"))
+
+;; Round 10 I3: apply calls its procedure once, so it is not a list-HOF callback.
+(assert-rejected "hc-2 r10i3: apply through a global alias, no base case: rejected"
+  "(define (g n z) (f n)) (define gg g) (define (f n) (apply gg (- n 1) (list 0))) (f 5)")
+(assert-rejected "hc-2 r10i3: top-level %cfa-spread identity: rejected"
+  "(define (%cfa-spread x) x) (define (f x) (if (null? x) 0 (f (%cfa-spread x)))) (f (list 1))")
+
+;; Round 10 I4: a named let inside a top-level anonymous lambda.
+(assert-no-violations "hc-2 r10i4: named let inside a top-level for-each lambda: accepted"
+  (check-source-termination "(for-each (lambda (n) (let lp ((i n)) (when (> i 0) (display i) (lp (- i 1))))) (list 1 2 3))"))
+(assert-no-violations "hc-2 r10i4: named let inside a let-bound lambda: accepted"
+  (check-source-termination "(let ((count-down (lambda (n) (let lp ((i n) (acc '())) (if (= i 0) acc (lp (- i 1) (cons i acc))))))) (display (count-down 5)))"))
+(assert-no-violations "hc-2 r10i4: named let inside a map lambda in a top-level define: accepted"
+  (check-source-termination "(define lst (map (lambda (x) (let lp ((k x) (acc 1)) (if (= k 0) acc (lp (- k 1) (* acc k))))) (list 1 2 3))) (display lst)"))
+(assert-no-violations "hc-2 r10i4: for-each lambda with a named let inside a top-level loop: accepted"
+  (check-source-termination "(let loop ((i 0)) (when (< i 3) (for-each (lambda (j) (let inner ((k j)) (when (> k 0) (display k) (inner (- k 1))))) (list i)) (loop (+ i 1))))"))
+
+(assert-rejected "hc-2 r10i4: named let in a top-level lambda calling back into its caller: rejected"
+  "(define (k p) (p p)) (k (lambda (self) (let lp ((i 1)) (when (> i 0) (k self) (lp (- i 1))))))")
+
+;; Round 10 I5: definitions in operator position or inside a wrapped lambda.
+(assert-no-violations "hc-2 r10i5: letrec in operator position: accepted"
+  (check-source-termination "(display ((letrec ((len (lambda (l) (if (null? l) 0 (+ 1 (len (cdr l))))))) len) (list 1 2 3)))"))
+(assert-no-violations "hc-2 r10i5: internal define in an applied lambda with an argument: accepted"
+  (check-source-termination "(display ((lambda (lst) (define (len l) (if (null? l) 0 (+ 1 (len (cdr l))))) (len lst)) (list 1 2 3)))"))
+(assert-no-violations "hc-2 r10i5: internal define in an applied thunk: accepted"
+  (check-source-termination "((lambda () (define (helper n) (if (= n 0) 0 (+ 1 (helper (- n 1))))) (display (helper 5))))"))
+
+(assert-rejected "hc-2 r10i5: non-decreasing letrec in operator position: rejected"
+  "(display ((letrec ((len (lambda (l) (if (null? l) 0 (+ 1 (len l)))))) len) (list 1 2 3)))")
+(assert-rejected "hc-2 r10i5: non-decreasing internal define in an applied thunk: rejected"
+  "((lambda () (define (helper n) (if (= n 0) 0 (+ 1 (helper (+ n 1))))) (display (helper 5))))")
+
+;; Round 10 I6: a mutual base case must test a formal.
+(assert-rejected "hc-2 r10i6: mutual numeric descent guarded only by string?: rejected"
+  "(define (f x) (if (string? x) 0 (g x))) (define (g x) (f (- x 1))) (f 5)")
+(assert-rejected "hc-2 r10i6: mutual numeric descent on both edges guarded only by string?: rejected"
+  "(define (f x) (if (string? x) 0 (g (- x 1)))) (define (g x) (f (- x 1))) (f 5)")
+(assert-no-violations "hc-2 r10i6: even/odd with a zero test: accepted"
+  (check-source-termination "(define (ev n) (if (= n 0) #t (od (- n 1)))) (define (od n) (if (= n 0) #f (ev (- n 1)))) (ev 4)"))
+(assert-no-violations "hc-2 r10i6: mutual structural descent with a pair? test: accepted"
+  (check-source-termination "(define (f x) (if (pair? x) (g (cdr x)) 0)) (define (g x) (f x)) (f (list 1 2))"))
+
+;; Round 10 minor: a multi-operand - or + is not a unit step.
+(assert-rejected "hc-2 r10m: (- x 1 -5) is not descent: rejected"
+  "(define (f x) (if (= x 0) 0 (f (- x 1 -5)))) (f 3)")
+(assert-rejected "hc-2 r10m: (+ x 1 -5) is not an increase: rejected"
+  "(define (f x) (if (>= x 10) 0 (f (+ x 1 -5)))) (f 3)")
+(assert-no-violations "hc-2 r10m: (- x 1) is still descent: accepted"
+  (check-source-termination "(define (f x) (if (= x 0) 0 (f (- x 1)))) (f 3)"))
+
+;; Round 11 C1: an empty spread set is still a spread, so a nested
+;; apply's site arguments are not its procedure's arguments.
+(assert-rejected "hc-2 r11c1: apply of apply with an all-data list: rejected"
+  "(define (g a b) (if (null? b) 0 (apply apply g (cdr b) (cons 1 b) (list '())))) (g 0 (list 1))")
+
+;; Round 11 C2: a member that only calls back through a HOF is no base
+;; case for a cycle that never passes through it.
+(assert-rejected "hc-2 r11c2: numeric self-loop beside a for-each callback edge: rejected"
+  "(define (f l k) (for-each k l)) (define (g x) (if (pair? x) (f x g) (g (- x 1)))) (f (list 5) g)")
+(assert-rejected "hc-2 r11c2: numeric g/h loop beside a for-each callback edge: rejected"
+  "(define (f l k) (for-each k l)) (define (g x) (if (pair? x) (f x g) (h (- x 1)))) (define (h y) (g (- y 1))) (f (list 5) g)")
+
+;; Round 11 C3: every cycle must pass through a member with its own base case.
+(assert-rejected "hc-2 r11c3: callee's base case does not cover the caller's self-loop: rejected"
+  "(define (f l k) (if (null? l) 0 (k (car l)))) (define (g x) (if (pair? x) (f x g) (g (- x 1)))) (f (list 5) g)")
+(assert-rejected "hc-2 r11c3: named mutual recursion, g loops without a base case: rejected"
+  "(define (f n) (if (= n 0) 0 (g (- n 1)))) (define (g n) (if (> n 100) (f (- n 1)) (g (- n 1)))) (f 5)")
+(assert-rejected "hc-2 r11c3: set!-bound lambdas, g loops without a base case: rejected"
+  "(define (run a) (let ((f #f) (g #f)) (set! f (lambda (n) (if (= n 0) 0 (g (- n 1))))) (set! g (lambda (n) (if (> n 100) (f (- n 1)) (g (- n 1))))) (f a))) (run 5)")
+(assert-no-violations "hc-2 r11c3: every cycle passes a base-case member: accepted"
+  (check-source-termination "(define (f n) (if (= n 0) 0 (g (- n 1)))) (define (g n) (if (= n 0) 1 (if (odd? n) (f (- n 1)) (g (- n 1))))) (f 5)"))
+
+;; Round 11 I1: quoted data, dotted or not, is never walked as code.
+(assert-no-violations "hc-2 r11i1: assoc on a quoted alist inside a for-each lambda: accepted"
+  (check-source-termination "(define (process-all items) (for-each (lambda (item) (let ((r (assoc item '((a . 1) (b . 2))))) (when r (display (cdr r))))) items)) (process-all '(a b))"))
+(assert-no-violations "hc-2 r11i1: assoc on a quoted alist in a let binding: accepted"
+  (check-source-termination "(define (lookup k) (let ((r (assoc k '((a . 1) (b . 2))))) (if r (cdr r) 0))) (display (map lookup '(a b)))"))
+(assert-no-violations "hc-2 r11i1: quoted alist as a direct argument: accepted"
+  (check-source-termination "(define (lookup k) (assoc k '((a . 1) (b . 2)))) (display (lookup 'a))"))
+(assert-no-violations "hc-2 r11i1: quoted dotted pair at top level: accepted"
+  (check-source-termination "(define x '(1 . 2)) (define (f l) (if (null? l) 0 (+ 1 (f (cdr l))))) (display (f (list (car x))))"))
+
+;; Round 12 C1: numeric descent on one edge does not carry a mutual
+;; cycle through an edge that decreases nothing (master's per-edge rule).
+(assert-rejected "hc-2 r12c1: (> n 10) test, g passes n through unchanged: rejected"
+  "(define (f n) (if (> n 10) 0 (g n))) (define (g n) (f (- n 1))) (f 5)")
+(assert-rejected "hc-2 r12c1: step of 2 over (= n 0), f passes n through: rejected"
+  "(define (f n) (if (= n 0) 0 (g n))) (define (g n) (f (- n 2))) (f 5)")
+(assert-rejected "hc-2 r12c1: base case on l while n descends on one edge: rejected"
+  "(define (f n l) (if (null? l) 0 (g n))) (define (g n) (f (- n 1) (list 1))) (f 5 (list 1))")
+(assert-rejected "hc-2 r12c1: descent inside an in-place let-bound closure, g passes n through: rejected"
+  "(define (f n) (let ((k (lambda () (g (- n 1))))) (if (= n 0) (k) (k)))) (define (g n) (f n)) (f 5)")
+(assert-no-violations "hc-2 r12c1: mutual structural walk with a pass-through edge: accepted"
+  (check-source-termination "(define (walk-tree t) (if (pair? t) (walk-list t) 1)) (define (walk-list l) (if (null? l) 0 (+ (walk-tree (car l)) (walk-list (cdr l))))) (display (walk-tree '(1 (2 3) 4)))"))
+
+;; Round 13 I1: the round-12 rule holds for anonymous cycles too, here
+;; set!-bound and self-passing lambdas inside a define.
+(assert-rejected "hc-2 r13i1: set!-bound lambdas, (> n 10) test, b passes n through: rejected"
+  "(define (run) (let ((a #f) (b #f)) (set! a (lambda (n) (if (> n 10) 0 (b n)))) (set! b (lambda (n) (a (- n 1)))) (a 5))) (run)")
+(assert-rejected "hc-2 r13i1: set!-bound lambdas, step of 2 over (= n 0): rejected"
+  "(define (run) (let ((a #f) (b #f)) (set! a (lambda (n) (if (= n 0) 0 (b n)))) (set! b (lambda (n) (a (- n 2)))) (a 5))) (run)")
+(assert-rejected "hc-2 r13i1: set!-bound lambdas, base case on l while n descends on one edge: rejected"
+  "(define (run) (let ((a #f) (b #f)) (set! a (lambda (n l) (if (null? l) 0 (b n)))) (set! b (lambda (n) (a (- n 1) (list 1)))) (a 5 (list 1)))) (run)")
+(assert-rejected "hc-2 r13i1: self-passing lambdas, (> n 10) test, a passes n through: rejected"
+  "(define (run) (let ((a (lambda (self other n) (if (> n 10) 0 (other other self n)))) (b (lambda (self other n) (other other self (- n 1))))) (a a b 5))) (run)")
+(assert-no-violations "hc-2 r13i1: set!-bound mutual structural walk with a pass-through edge: accepted"
+  (check-source-termination "(define (run t) (let ((wt #f) (wl #f)) (set! wt (lambda (t) (if (pair? t) (wl t) 1))) (set! wl (lambda (l) (if (null? l) 0 (+ (wt (car l)) (wl (cdr l)))))) (wt t))) (display (run '(1 (2 3) 4)))"))
+
+;; Round 14 I1: the guard variable is bound in the 0CFA; a call through
+;; it after set! is a call the analysis cannot resolve.
+(assert-rejected "hc-2 r14i1: (set! e loop) inside a guard clause, then (e n): rejected"
+  "(define (loop n) (guard (e (#t (set! e loop) (e n))) (car '()))) (loop 1)")
+(assert-rejected "hc-2 r14i1: (set! e f) inside a top-level guard clause, then (e e): rejected"
+  "(define (f g) (g g)) (guard (e (#t (set! e f) (e e))) (car '()))")
+(assert-rejected "hc-2 r14i1: a raised procedure called from the guard clause: rejected"
+  "(define (loop n) (guard (e (#t (e n))) (raise loop))) (loop 1)")
+(assert-no-violations "hc-2 r14i1: guard with a constant fallback: accepted"
+  (check-source-termination "(define (safe-car l) (guard (e (#t 0)) (car l))) (display (safe-car '()))"))
+(assert-no-violations "hc-2 r14i1: structural recursion inside a guard body: accepted"
+  (check-source-termination "(define (len l) (guard (e (#t 0)) (if (null? l) 0 (+ 1 (len (cdr l)))))) (display (len '(1 2)))"))
+
+;; Round 14 minor: a cyclic quoted literal must not hang the checker.
+(assert-rejected "hc-2 r14m: cyclic quoted literal, (f (car x)): rejected without hanging"
+  "(define (f x) (if (pair? x) (f (car x)) 0)) (f '#0=(#0#))")
+(assert-rejected "hc-2 r14m: cyclic quoted list, (f (cdr l)): rejected"
+  "(define (f l) (if (pair? l) (f (cdr l)) 0)) (f '#0=(1 . #0#))")
+(assert-rejected "hc-2 r14m: cyclic quoted vector walked by vector-ref: rejected"
+  "(define (f v) (if (vector? v) (f (vector-ref v 0)) 0)) (f '#0=#(#0#))")
+(assert-rejected "hc-2 r14m: cyclic code form: rejected without hanging"
+  "(define (f x) #0=(+ 1 #0#))")
+(assert-no-violations "hc-2 r14m: shared acyclic datum label: accepted"
+  (check-source-termination "(define (f l) (if (pair? l) (f (cdr l)) 0)) (display (f '(#0=(1 2) #0#)))"))
+
+;; Round 15 C1/C2: the "bound minus x" measure holds only for a formal
+;; an upper-bound test constrains, with a bound that cannot grow: every
+;; formal it mentions passes unchanged in place, its operators are pure
+;; size functions, and nothing it names is assigned.
+(assert-rejected "hc-2 r15c1: bound arcs on an unconstrained formal n: rejected"
+  "(define (f i n l) (if (>= i 10) 0 (if (null? l) (f i (+ n 1) (list 1)) (f i n (cdr l))))) (f 0 0 '())")
+(assert-rejected "hc-2 r15c2: bound (length l) while l grows: rejected"
+  "(define (f i l m) (if (>= i (length l)) 0 (if (null? m) (f (+ i 1) l (cons 1 m)) (f i (cons 1 (cons 1 l)) (cdr m))))) (f 0 (list 1) (list 1))")
+(assert-rejected "hc-2 r15i1: i passed through, only n grows: rejected"
+  "(define (f i n) (if (>= i 10) 0 (f i (+ n 1)))) (f 0 0)")
+(assert-rejected "hc-2 r15i1: bound (* 2 n) grows with i: rejected"
+  "(define (f i n) (if (>= i (* 2 n)) 0 (f (+ i 1) (+ n 1)))) (f 0 5)")
+(assert-rejected "hc-2 r15i1: bound (vector-length v) while v grows: rejected"
+  "(define (f i v) (if (>= i (vector-length v)) 0 (f (+ i 1) (make-vector (+ 2 (vector-length v)) 0)))) (f 0 (vector 1))")
+(assert-rejected "hc-2 r15i1: bound (length l) while l grows each call: rejected"
+  "(define (f i l) (if (>= i (length l)) 0 (f (+ i 1) (cons 1 (cons 1 l))))) (f 0 (list 1))")
+(assert-rejected "hc-2 r15: bound is a global the body raises: rejected"
+  "(define lim 10) (define (f i) (if (>= i lim) 0 (begin (set! lim (+ lim 2)) (f (+ i 1))))) (f 0)")
+(assert-rejected "hc-2 r15: bound read through a user function: rejected"
+  "(define c 0) (define (lim) (set! c (+ c 2)) c) (define (f i) (if (>= i (lim)) 0 (f (+ i 1)))) (f 0)")
+(assert-rejected "hc-2 r15: when runs its body when the upper-bound test holds: rejected"
+  "(define (f i) (when (>= i 10) (f (+ i 1)))) (f 10)")
+(assert-no-violations "hc-2 r15: index up to (vector-length v), v passed in place: accepted"
+  (check-source-termination "(define (f i v) (if (>= i (vector-length v)) 0 (+ (vector-ref v i) (f (+ i 1) v)))) (display (f 0 (vector 1 2)))"))
+(assert-no-violations "hc-2 r15: index up to a literal, accumulator grows: accepted"
+  (check-source-termination "(define (f i acc) (if (>= i 10) acc (f (+ i 1) (cons i acc)))) (display (f 0 '()))"))
+(assert-no-violations "hc-2 r15: index up to (- (length l) 1), l in place: accepted"
+  (check-source-termination "(define (f i l) (if (>= i (- (length l) 1)) 0 (f (+ i 1) l))) (display (f 0 '(1 2 3)))"))
+(assert-no-violations "hc-2 r15: unless with an upper-bound test: accepted"
+  (check-source-termination "(define (f i) (unless (>= i 10) (f (+ i 1)))) (f 0)"))
+
+;; ============================================================
 ;; Results
 ;; ============================================================
 (newline)

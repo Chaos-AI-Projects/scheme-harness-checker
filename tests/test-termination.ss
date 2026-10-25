@@ -2343,6 +2343,48 @@
 (assert-no-violations "hc-3 rest-args lambda whose first formal names a user HOF: accepted"
   (check-source-termination/no-crash "(define (app h x) (h x)) (define (k a) ((lambda (app . s) app) 1 2)) (display (k 1))"))
 
+;; HC-4: false accepts found by the HC-2 round-16 review (PR #729).
+;; I1: a bound read through a body-local binding may grow between calls.
+(assert-rejected "hc-4 i1: bound n let-bound from a growing l: rejected"
+  "(define (f i l) (let ((n (length l))) (if (>= i n) 0 (f (+ i 1) (cons 1 l))))) (display (f 0 '(1 2)))")
+(assert-rejected "hc-4 i1: bound n from an internal define: rejected"
+  "(define (f i l) (define n (length l)) (if (>= i n) 0 (f (+ i 1) (cons 1 l)))) (display (f 0 '(1 2)))")
+(assert-rejected "hc-4 i1: bound n from let* over a rebound l: rejected"
+  "(define (f i l) (let* ((l (cons 1 l)) (n (length l))) (if (>= i n) 0 (f (+ i 1) l)))) (display (f 0 '(1 2)))")
+(assert-no-violations "hc-4 i1: bound is a top-level constant: accepted"
+  (check-source-termination "(define n 10) (define (f i) (if (>= i n) 0 (f (+ i 1)))) (display (f 0))"))
+;; I3: a base case must guard the recursive call it is credited for.
+(assert-rejected "hc-4 i3: upper-bound test in a separate statement: rejected"
+  "(define (f i) (if (>= i 10) 0 0) (f (+ i 1))) (display (f 0))")
+(assert-rejected "hc-4 i3: one branch recurses with no bound test: rejected"
+  "(define (f i j) (if (> j 0) (if (>= i 10) 0 (f (+ i 1) j)) (f (+ i 1) j))) (display (f 0 0))")
+(assert-rejected "hc-4 i3: zero test in a separate statement: rejected"
+  "(define (f n) (if (= n 0) 0 0) (f (- n 1))) (display (f 3))")
+(assert-no-violations "hc-4 i3: countdown guarded by its zero test: accepted"
+  (check-source-termination "(define (f n) (if (= n 0) 0 (f (- n 1)))) (display (f 3))"))
+(assert-no-violations "hc-4 i3: count-up guarded by unless: accepted"
+  (check-source-termination "(define (f i) (unless (>= i 10) (f (+ i 1)))) (f 0)"))
+(assert-no-violations "hc-4 i3: countdown guarded by when (> n 0): accepted"
+  (check-source-termination "(define (f n) (when (> n 0) (f (- n 1)))) (f 3)"))
+(assert-no-violations "hc-4 i3: countdown in a cond else clause: accepted"
+  (check-source-termination "(define (f n) (cond ((<= n 0) 0) (else (f (- n 1))))) (display (f 3))"))
+;; I4: a base case on one formal does not stop descent on another.
+(assert-rejected "hc-4 i4: zero test on m, descent on n: rejected"
+  "(define (f n m) (if (= m 0) 0 (f (- n 1) m))) (display (f 3 1))")
+(assert-rejected "hc-4 i4: upper-bound test on n, descent on n: rejected"
+  "(define (f n) (if (>= n 10) 0 (f (- n 1)))) (display (f 3))")
+
+;; HC-4 review: a mutual guard against a formal crashed (cdr #f).
+(assert-true "hc-4 mutual guard against a formal: no crash"
+  (list? (guard (e (#t #f)) (check-source-termination "(define (ev n m) (if (= n 0) #t (if (< n m) #t (od (- n 1) m)))) (define (od n m) (if (= n 0) #f (ev (- n 1) m))) (display (ev 10 3))"))))
+;; HC-4 review: the anonymous-lambda path trusted unguarded numeric arcs.
+(assert-rejected "hc-4 anon i3: zero test in a separate statement: rejected"
+  "(define (k) ((lambda (s) (s s 3)) (lambda (self n) (if (= n 0) 0 0) (self self (- n 1))))) (display (k))")
+(assert-rejected "hc-4 anon i4: zero test on m, descent on n: rejected"
+  "(define (k) ((lambda (s) (s s 3 1)) (lambda (self n m) (if (= m 0) 0 (self self (- n 1) m))))) (display (k))")
+(assert-no-violations "hc-4 anon: guarded countdown: accepted"
+  (check-source-termination "(define (k) ((lambda (s) (s s 3)) (lambda (self n) (if (= n 0) 0 (self self (- n 1)))))) (display (k))"))
+
 ;; ============================================================
 ;; Results
 ;; ============================================================

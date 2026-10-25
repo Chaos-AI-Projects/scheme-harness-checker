@@ -49,7 +49,8 @@
           ;; Type-env lookup
           type-env-lookup)
   (import (rnrs)
-          (only (chezscheme) top-level-bound? top-level-syntax? scheme-environment gensym)
+          (only (chezscheme) top-level-bound? top-level-syntax? scheme-environment gensym
+                make-weak-eq-hashtable)
           (harness-checker types)
           (harness-checker cfa)
           (harness-checker sct))
@@ -760,7 +761,11 @@
                              '() '()
                              (cons (cadr e) args)
                              (cfa-lambda-formals (lam (cadr e)))
-                             numeric-strict?)))
+                             numeric-strict?
+                             (or (guards-at (cfa-lambda-body caller) site-expr) '())
+                             (make-bound-ok? (proper-formals (cfa-lambda-formals caller)) #f
+                                             (set!-targets exprs)
+                                             (body-binders (cfa-lambda-body caller))))))
           ;; Numeric descent stops only at a base-case test, so every cycle
           ;; needs a member with a branch, guarded by a test on its formals,
           ;; that makes none of the cycle's calls (HC-2 round 10 I1, round 11 C3).
@@ -1667,8 +1672,12 @@
   ;; numeric-strict?: #f demotes numeric-step arcs to non-strict, leaving
   ;; only structural descent strict. bounded: the formals whose "bound
   ;; minus x" measure gets arcs.
+  ;; guards: the branch tests at the call site (see guards-at), or 'any
+  ;; to trust numeric arcs unguarded. bound-ok? judges a guard's bound.
   (define (call-sc-graph caller caller-formals type-env bounded call callee-formals
-                         numeric-strict?)
+                         numeric-strict? guards bound-ok?)
+    (define (guarded? ok? x)
+      (or (eq? guards 'any) (ok? x guards bound-ok?)))
     (make-sc-graph caller (car call)
       (let loop ((args (cdr call)) (params callee-formals) (j 0) (acc '()))
         (if (or (not (pair? args)) (not (pair? params)))
@@ -1685,13 +1694,16 @@
                             (cond
                               ((and placed?
                                     (sc-decreasing-expr? a x (type-env-lookup type-env x)))
-                               (list (list x y (or numeric-strict? (not (numeric-step? a))))))
+                               (list (list x y (or (not (numeric-step? a))
+                                                   (and numeric-strict?
+                                                        (guarded? descent-guarded? x))))))
                               ((eq? a x) (list (list x y #f)))
                               (else '()))
                             (cond
                               ((not (and (memq x bounded) (memq y bounded))) '())
                               ((and (= i j) (increasing-expr? a x))
-                               (list (list (bound-measure x) (bound-measure y) #t)))
+                               (list (list (bound-measure x) (bound-measure y)
+                                           (guarded? ascent-guarded? x))))
                               ((eq? a x)
                                (list (list (bound-measure x) (bound-measure y) #f)))
                               (else '()))
@@ -1708,27 +1720,37 @@
   ;; sound: the bound cannot grow between calls. It may apply only
   ;; pure-bound-ops, every formal it mentions must be passed unchanged in
   ;; place on every recursive call, and no name in it may be assigned
-  ;; anywhere (assigned: every set! target in the program). HC-2 round 15
+  ;; anywhere (assigned: every set! target in the program). Any other
+  ;; name must be bound outside the definition (local: every name the body
+  ;; binds), since a body-local binding is recomputed on each call (HC-4
+  ;; I1). HC-2 round 15
   ;; C1/C2: without this, an unconstrained formal or a growing bound
   ;; such as (length l) under (cons 1 l) carried the measure.
-  (define (bounded-formals pairs formals calls assigned)
+  ;; calls #f: no formal is stable (a mutual SCC or an anonymous cycle).
+  (define (make-bound-ok? formals calls assigned local)
     (define (in-place? z)
-      (let ((i (let loop ((fs formals) (i 0))
+      (and calls
+       (let ((i (let loop ((fs formals) (i 0))
                  (cond ((null? fs) #f) ((eq? (car fs) z) i) (else (loop (cdr fs) (+ i 1)))))))
         (for-all (lambda (call)
                    (let loop ((args (cdr call)) (k 0))
                      (and (pair? args)
                           (if (= k i) (eq? (car args) z) (loop (cdr args) (+ k 1))))))
-                 calls)))
+                 calls))))
     (define (stable? e)
       (cond
         ((symbol? e) (and (not (memq e assigned))
-                          (or (not (memq e formals)) (in-place? e))))
+                          (if (memq e formals)
+                              (in-place? e)
+                              (not (memq e local)))))
         ((pair? e) (or (eq? (car e) 'quote)
                        (and (memq (car e) pure-bound-ops)
                             (list? e)
                             (for-all stable? (cdr e)))))
         (else #t)))
+    stable?)
+
+  (define (bounded-formals pairs formals stable?)
     (let loop ((ps pairs) (acc '()))
       (cond
         ((null? ps) acc)
@@ -1736,7 +1758,7 @@
          (loop (cdr ps) (cons (caar ps) acc)))
         (else (loop (cdr ps) acc)))))
 
-  ;; 'terminates, 'no-descent or 'limit for the SCC scc-names.
+  ;; 'terminates, 'no-descent, 'unguarded or 'limit for the SCC scc-names.
   ;; formals-of, body-of and type-env-of map a member name to its formals
   ;; (or #f), body and scoped type-env.
   ;; exprs: the whole program, for the names bound around each body.
@@ -1753,14 +1775,23 @@
         (body-of caller) scc-names
         (append (formal-names (or (formals-of caller) '()))
                 (names-bound-around exprs (body-of caller)))))
+    ;; A guard's bound must not move between calls. In a mutual SCC a
+    ;; formal sits in different positions per member, so none is stable.
+    (define (bound-ok?-of caller)
+      (let ((formals (proper-formals (or (formals-of caller) '()))))
+        (make-bound-ok? formals
+                        (if (= (length scc-names) 1) (calls-of caller) #f)
+                        (set!-targets exprs)
+                        (body-binders (body-of caller)))))
     (let ((bounded (if (and (= (length scc-names) 1) (formals-of (car scc-names)))
                        (let* ((n (car scc-names))
                               (formals (proper-formals (formals-of n))))
                          (bounded-formals
                            (upper-bound-base-cases (body-of n) n formals)
-                           formals (calls-of n) (set!-targets exprs)))
+                           formals (bound-ok?-of n)))
                        '())))
-      (define (graphs numeric-strict?)
+      (define (graphs guarded?)
+       (lambda (numeric-strict?)
         (apply append
           (map (lambda (caller)
                  (let ((caller-formals
@@ -1770,10 +1801,23 @@
                           (call-sc-graph caller caller-formals (type-env-of caller)
                                          bounded call
                                          (proper-formals (or (formals-of (car call)) '()))
-                                         numeric-strict?))
+                                         numeric-strict?
+                                         (if guarded?
+                                             (or (guards-at (body-of caller)
+                                                            (hashtable-ref call-sites call #f))
+                                                 '())
+                                             'any)
+                                         (bound-ok?-of caller)))
                         (calls-of caller))))
-               scc-names)))
-      (sc-check-members graphs (length scc-names))))
+               scc-names))))
+      ;; 'unguarded: descent exists but no test on the descending formal
+      ;; guards it, which the drivers report as a missing base case when
+      ;; there is none at all.
+      (let ((result (sc-check-members (graphs #t) (length scc-names))))
+        (if (and (eq? result 'no-descent)
+                 (eq? (sc-check-members (graphs #f) (length scc-names)) 'terminates))
+            'unguarded
+            result))))
 
   ;; Size-change check of one SCC. graphs-of maps numeric-strict? to the
   ;; SCC's call graphs. A mutual SCC passes on structural descent alone
@@ -1984,7 +2028,9 @@
 
                        ;; No formals, or some cycle of recursive calls with
                        ;; no argument that shrinks all the way round
-                       ((eq? progress 'no-descent)
+                       ((or (eq? progress 'no-descent)
+                            (and (eq? progress 'unguarded)
+                                 (has-base-case? body name formals local-type-env)))
                         (add-violation! 'no-decreasing-arg name
                           (or def-form (list 'define name '...))
                           (string-append "recursive function \""
@@ -2085,6 +2131,124 @@
                     acc))
               acc es)))))
 
+  ;; The branch tests that hold where target, found by eq?, is evaluated:
+  ;; a list of (test . #t) for a test known true there, (test . #f) for
+  ;; one known false. Only if, cond, when and unless contribute, and a
+  ;; test is dropped under any binder that rebinds a name it mentions.
+  ;; #f when target is not in body-exprs. Only a form that binds its own
+  ;; keyword is noticed here; outer shadowing of if/cond/when/unless is
+  ;; safe because alpha-rename-definitions renames those binders first.
+  (define (guards-at body-exprs target)
+    (call/cc
+      (lambda (k)
+        (define (drop-rebound guards names)
+          (filter (lambda (g) (not (expr-references-any? (car g) names))) guards))
+        (define (walk expr guards)
+          (when (eq? expr target) (k guards))
+          (when (and (pair? expr) (list? expr) (not (eq? (car expr) 'quote)))
+            (let* ((binds (if (symbol? (car expr)) (form-binds expr) '()))
+                   (guards (if (null? binds) guards (drop-rebound guards binds)))
+                   (kw (and (symbol? (car expr)) (not (memq (car expr) binds))
+                            (car expr))))
+              (cond
+                ((and (eq? kw 'if) (<= 3 (length expr) 4))
+                 (let ((test (cadr expr)))
+                   (walk test guards)
+                   (walk (caddr expr) (cons (cons test #t) guards))
+                   (when (= (length expr) 4)
+                     (walk (cadddr expr) (cons (cons test #f) guards)))))
+                ((and (memq kw '(when unless)) (pair? (cdr expr)))
+                 (let ((test (cadr expr)))
+                   (walk test guards)
+                   (for-each-sub
+                     (lambda (e) (walk e (cons (cons test (eq? kw 'when)) guards)))
+                     (cddr expr))))
+                ((eq? kw 'cond)
+                 (let loop ((clauses (cdr expr)) (guards guards))
+                   (when (pair? clauses)
+                     (let ((c (car clauses)))
+                       (if (and (list? c) (pair? c))
+                           (let ((test (car c)))
+                             (if (eq? test 'else)
+                                 (for-each-sub (lambda (e) (walk e guards)) (cdr c))
+                                 (begin
+                                   (walk test guards)
+                                   (for-each-sub
+                                     (lambda (e) (walk e (cons (cons test #t) guards)))
+                                     (cdr c))))
+                             (loop (cdr clauses)
+                                   (if (eq? test 'else)
+                                       guards
+                                       (cons (cons test #f) guards))))
+                           (loop (cdr clauses) guards))))))
+                (else
+                 (for-each-sub (lambda (sub) (when (pair? sub) (walk sub guards)))
+                               expr))))))
+        (for-each-sub (lambda (e) (walk e '())) body-exprs)
+        #f)))
+
+  ;; A test whose truth stops numeric descent on x at bound c: (= x c),
+  ;; (zero? x), (< x c), (<= x c) and their mirrors. bound-ok? judges c.
+  (define (lower-stop-test? t x bound-ok?)
+    (and (pair? t) (list? t)
+         (case (car t)
+           ((zero?) (and (= (length t) 2) (eq? (cadr t) x)))
+           ((= < <=) (and (= (length t) 3) (eq? (cadr t) x)
+                          (not (expr-references-any? (caddr t) (list x)))
+                          (bound-ok? (caddr t))))
+           ((>) (and (= (length t) 3) (eq? (caddr t) x)
+                     (not (expr-references-any? (cadr t) (list x)))
+                     (bound-ok? (cadr t))))
+           ((>=) (and (= (length t) 3) (eq? (caddr t) x)
+                      (not (expr-references-any? (cadr t) (list x)))
+                      (bound-ok? (cadr t))))
+           ((not) (and (= (length t) 2) (lower-pass-test? (cadr t) x bound-ok?)))
+           (else #f))))
+
+  ;; A test whose truth keeps x above a bound: (> x c), (>= x c),
+  ;; (positive? x) and their mirrors.
+  (define (lower-pass-test? t x bound-ok?)
+    (and (pair? t) (list? t)
+         (case (car t)
+           ((positive?) (and (= (length t) 2) (eq? (cadr t) x)))
+           ((> >=) (and (= (length t) 3) (eq? (cadr t) x)
+                        (not (expr-references-any? (caddr t) (list x)))
+                        (bound-ok? (caddr t))))
+           ((< <=) (and (= (length t) 3) (eq? (caddr t) x)
+                        (not (expr-references-any? (cadr t) (list x)))
+                        (bound-ok? (cadr t))))
+           ((not) (and (= (length t) 2) (lower-stop-test? (cadr t) x bound-ok?)))
+           (else #f))))
+
+  ;; Numeric descent on x is strict at a call only under a guard that
+  ;; stops it there (HC-4 I3, I4).
+  (define (descent-guarded? x guards bound-ok?)
+    (exists (lambda (g)
+              (if (cdr g)
+                  (lower-pass-test? (car g) x bound-ok?)
+                  (lower-stop-test? (car g) x bound-ok?)))
+            guards))
+
+  ;; Ascent of x toward its bound is strict at a call only under a false
+  ;; upper-bound test on x whose bound is stable (HC-4 I3).
+  (define (ascent-guarded? x guards bound-ok?)
+    (exists (lambda (g)
+              (and (not (cdr g))
+                   (upper-bound-base-case-test? (car g) (list x))
+                   (let ((pair (upper-bound-test-pair (car g) (list x))))
+                     (and (eq? (car pair) x) (bound-ok? (cdr pair))))))
+            guards))
+
+  ;; Every name some form in body-exprs binds, including its own defines.
+  (define (body-binders body-exprs)
+    (let collect ((es body-exprs) (acc (define-names body-exprs)))
+      (fold-left
+        (lambda (acc e)
+          (if (and (pair? e) (list? e) (not (eq? (car e) 'quote)))
+              (collect e (if (symbol? (car e)) (append (form-binds e) acc) acc))
+              acc))
+        acc es)))
+
   ;; Collect intra-SCC call expressions from body expressions.
   ;; Returns a list of (callee-name arg-exprs...) for calls to SCC members.
   ;; Includes self-calls (since self-edges within a multi-node SCC must also
@@ -2097,16 +2261,22 @@
   ;; user-names are names the program binds outside body-exprs, such as
   ;; top-level defines and the caller's formals: a built-in HOF's name
   ;; bound there is not that HOF.
+  ;; Each call collect-intra-scc-calls returns, mapped to the expression
+  ;; it was built from, so guards-at can find its site.
+  (define call-sites (make-weak-eq-hashtable))
+
   (define (collect-intra-scc-calls body-exprs scc-members user-names)
     (let ((calls '()))
       ;; Inside a closure that may run in a later activation, every
       ;; argument is #f: (cdr x) there is smaller than the x of the
       ;; activation that built the closure, not of the one running it.
       (define (opaque-args expr shadowed captured?)
-        (cons (car expr)
-              (map (lambda (a)
-                     (if (or captured? (expr-references-any? a shadowed)) #f a))
-                   (cdr expr))))
+        (let ((call (cons (car expr)
+                          (map (lambda (a)
+                                 (if (or captured? (expr-references-any? a shadowed)) #f a))
+                               (cdr expr)))))
+          (hashtable-set! call-sites call expr)
+          call))
       (define (lambda-form? e)
         (and (pair? e) (memq (car e) '(lambda case-lambda)) #t))
       ;; Indices of the arguments a built-in calls during this very call:
@@ -2412,7 +2582,10 @@
                             'no-descent
                             (scc-size-change scc-names formals-of body-of type-env-of
                                              exprs)))
-                      (all-edges-decrease (eq? progress 'terminates)))
+                      (all-edges-decrease
+                        (or (eq? progress 'terminates)
+                            (and (eq? progress 'unguarded)
+                                 (not (scc-has-base-case? exprs scc-names graph))))))
 
                  (cond
                    ((eq? progress 'limit)

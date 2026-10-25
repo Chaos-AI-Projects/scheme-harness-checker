@@ -67,6 +67,15 @@
   ;; Utility
   ;; ---------------------------------------------------------------
 
+  ;; for-each over the proper prefix of l. Source forms are not all
+  ;; proper lists: dotted formals such as (f a . rest) end in a symbol,
+  ;; and a walker that recurses into them must not raise (HC-3).
+  (define (for-each-sub proc l)
+    (let loop ((l l))
+      (when (pair? l)
+        (proc (car l))
+        (loop (cdr l)))))
+
   (define (deduplicate syms)
     (let loop ((remaining syms) (seen '()) (result '()))
       (if (null? remaining)
@@ -206,7 +215,7 @@
                    (body (cddr expr)))
                (set! defs (cons (cons name body) defs))
                ;; Recurse into body to find internal defines
-               (for-each process-expr body)))
+               (for-each-sub process-expr body)))
 
             ;; (define name (lambda (...) body...))
             ((and (eq? (car expr) 'define)
@@ -220,7 +229,7 @@
                    (body (cddr (caddr expr))))
                (set! defs (cons (cons name body) defs))
                ;; Recurse into body to find internal defines
-               (for-each process-expr body)))
+               (for-each-sub process-expr body)))
 
             ;; (define name (case-lambda clause...))
             ((and (eq? (car expr) 'define)
@@ -237,14 +246,14 @@
                                            clauses))))
                (set! defs (cons (cons name all-bodies) defs))
                ;; Recurse into clause bodies to find internal defines
-               (for-each process-expr all-bodies)))
+               (for-each-sub process-expr all-bodies)))
 
             ;; (letrec ((name (lambda ...)) ...) body...)
             ;; (letrec* ((name (lambda ...)) ...) body...)
             ((and (memq (car expr) '(letrec letrec*))
                   (pair? (cdr expr))
                   (pair? (cadr expr)))
-             (for-each
+             (for-each-sub
               (lambda (binding)
                 (when (and (pair? binding)
                            (symbol? (car binding))
@@ -260,7 +269,7 @@
                                               (cdr (cadr binding)))))))
                     (set! defs (cons (cons name body) defs))
                     ;; Recurse into body to find internal defines
-                    (for-each process-expr body)))
+                    (for-each-sub process-expr body)))
                 ;; Any other init may hold one, as cfa-rewrite-program
                 ;; wraps anonymous lambdas in letrec wherever they sit.
                 (when (and (pair? binding) (pair? (cdr binding))
@@ -269,18 +278,18 @@
                   (process-expr (cadr binding))))
               (cadr expr))
              ;; Also recurse into the letrec body expressions
-             (for-each process-expr (cddr expr)))
+             (for-each-sub process-expr (cddr expr)))
 
             ;; For other compound expressions, recurse to find nested
             ;; defines, operator included: ((letrec ((lp ...)) lp) 1).
             (else
-             (for-each
+             (for-each-sub
               (lambda (sub)
                 (when (pair? sub)
                   (process-expr sub)))
               expr)))))
 
-      (for-each process-expr exprs)
+      (for-each-sub process-expr exprs)
       (reverse defs)))
 
   ;; ---------------------------------------------------------------
@@ -309,8 +318,8 @@
             (when (pair? (car expr))
               (walk (car expr)))
             ;; Recurse into argument sub-expressions only
-            (for-each walk (cdr expr)))))
-      (for-each walk body-exprs)
+            (for-each-sub walk (cdr expr)))))
+      (for-each-sub walk body-exprs)
       (deduplicate calls)))
 
   ;; Collect HOF callback edges from body expressions.
@@ -328,14 +337,14 @@
               (let ((cb-pos (hof-callback-position (car expr))))
                 (when cb-pos
                   (let ((args (cdr expr)))
-                    (when (> (length args) cb-pos)
+                    (when (and (list? args) (> (length args) cb-pos))
                       (let ((cb-arg (list-ref args cb-pos)))
                         (when (symbol? cb-arg)
                           (set! edges (cons (cons caller-name cb-arg) edges)))))))))
-            (for-each walk (cdr expr))
+            (for-each-sub walk (cdr expr))
             (when (pair? (car expr))
               (walk (car expr))))))
-      (for-each walk body-exprs)
+      (for-each-sub walk body-exprs)
       edges))
 
   ;; Collect user-defined HOF callback edges from body expressions.
@@ -352,14 +361,14 @@
                 (when entry
                   (let ((cb-pos (cdr entry))
                         (args (cdr expr)))
-                    (when (> (length args) cb-pos)
+                    (when (and (list? args) (> (length args) cb-pos))
                       (let ((cb-arg (list-ref args cb-pos)))
                         (when (symbol? cb-arg)
                           (set! edges (cons (list caller-name (car expr) cb-arg) edges)))))))))
-            (for-each walk (cdr expr))
+            (for-each-sub walk (cdr expr))
             (when (pair? (car expr))
               (walk (car expr))))))
-      (for-each walk body-exprs)
+      (for-each-sub walk body-exprs)
       edges))
 
   ;; Check if a symbol appears in call position (car of a non-quoted
@@ -373,8 +382,8 @@
               (set! found #t))
             (when (pair? (car expr))
               (walk (car expr)))
-            (for-each walk (cdr expr)))))
-      (for-each walk body-exprs)
+            (for-each-sub walk (cdr expr)))))
+      (for-each-sub walk body-exprs)
       found))
 
   ;; Detect user-defined higher-order functions by checking if any
@@ -387,7 +396,7 @@
   ;; collection-hof whitelist are excluded.
   (define (detect-user-defined-hofs defs exprs)
     (let ((result '()))
-      (for-each
+      (for-each-sub
         (lambda (def)
           (let* ((name (car def))
                  (body (cdr def))
@@ -717,7 +726,7 @@
                (succ (make-eqv-hashtable))
                (graph
                  (begin
-                   (for-each
+                   (for-each-sub
                      (lambda (e)
                        (let ((ss (hashtable-ref succ (car e) '())))
                          (unless (memv (cadr e) ss)
@@ -840,7 +849,7 @@
           '()
           (cfa-result-sites result)))
 
-      (for-each
+      (for-each-sub
         (lambda (site)
           (let ((calls (synth-calls site)))
             (unless (null? calls)
@@ -887,7 +896,7 @@
           ;; Process successors
           (let ((successors (let ((entry (assq v graph)))
                               (if entry (cdr entry) '()))))
-            (for-each
+            (for-each-sub
              (lambda (w)
                (cond
                  ((not (hashtable-contains? indices w))
@@ -916,7 +925,7 @@
                       (loop new-component))))))))
 
       ;; Process all nodes in the graph
-      (for-each
+      (for-each-sub
        (lambda (entry)
          (unless (hashtable-contains? indices (car entry))
            (strongconnect (car entry))))
@@ -961,8 +970,8 @@
             (when (pair? (car expr))
               (walk (car expr)))
             ;; Walk sub-expressions
-            (for-each (lambda (sub) (when (pair? sub) (walk sub)))
-                      (cdr expr)))))
+            (for-each-sub (lambda (sub) (when (pair? sub) (walk sub)))
+                          (cdr expr)))))
 
       (define (check-do-form do-expr)
         (when (and (pair? (cdr do-expr))
@@ -1011,7 +1020,7 @@
                (add-violation! do-expr
                  "do-form exit test does not reference any loop variable"))))))
 
-      (for-each walk exprs)
+      (for-each-sub walk exprs)
       (reverse violations)))
 
   ;; ---------------------------------------------------------------
@@ -1191,9 +1200,9 @@
                ;; Recurse
                (when (pair? (car expr))
                  (walk (car expr)))
-               (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+               (for-each-sub (lambda (sub) (when (pair? sub) (walk sub)))
                          (cdr expr)))))
-         (for-each walk body-exprs)
+         (for-each-sub walk body-exprs)
          (and found-any all-decrease)))))
 
   ;; Check if an expression is a base-case test for the given variables.
@@ -1343,7 +1352,7 @@
                    (when (pair? (cdddr expr)) (walk (cadddr expr))))))
               ;; (cond clauses...)
               ((eq? (car expr) 'cond)
-               (for-each
+               (for-each-sub
                  (lambda (clause)
                    (when (and (pair? clause) (pair? (cdr clause)))
                      (let ((test (car clause)))
@@ -1358,9 +1367,9 @@
                  (note! (cadr expr))))
               (else
                (when (pair? (car expr)) (walk (car expr)))
-               (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+               (for-each-sub (lambda (sub) (when (pair? sub) (walk sub)))
                          (cdr expr)))))))
-      (for-each walk body-exprs)
+      (for-each-sub walk body-exprs)
       found))
 
   ;; Check if the body has a base case -- a conditional branch that does
@@ -1409,7 +1418,7 @@
                  ;; (cond (test expr ...) ...) -- base case if any clause
                  ;; has a test that's a base-case-test and body doesn't recurse
                  ((eq? (car expr) 'cond)
-                  (for-each
+                  (for-each-sub
                     (lambda (clause)
                       (when (and (pair? clause) (pair? (cdr clause)))
                         (let ((test (car clause))
@@ -1419,7 +1428,7 @@
                                      (not (calls? body)))
                             (set! found #t))
                           ;; Recurse into clause bodies
-                          (for-each walk body))))
+                          (for-each-sub walk body))))
                     (cdr expr)))
 
                  ;; (when test body...) -- implicit base case: if test is false,
@@ -1434,7 +1443,7 @@
                                  (not (calls? test))
                                  (expr-references-any? test vars))
                         (set! found #t))
-                      (for-each walk body))))
+                      (for-each-sub walk body))))
 
                  ;; (unless test body...) -- implicit base case: if test is true,
                  ;; loop returns void (doesn't recurse)
@@ -1447,15 +1456,15 @@
                                  (not (calls? test))
                                  (expr-references-any? test vars))
                         (set! found #t))
-                      (for-each walk body))))
+                      (for-each-sub walk body))))
 
                  ;; Generic: recurse into sub-expressions
                  (else
                   (when (pair? (car expr))
                     (walk (car expr)))
-                  (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+                  (for-each-sub (lambda (sub) (when (pair? sub) (walk sub)))
                             (cdr expr)))))))
-         (for-each walk body-exprs)
+         (for-each-sub walk body-exprs)
          found))
 
   ;; Analyze all named-let forms in a list of expressions for termination issues.
@@ -1497,7 +1506,7 @@
                          (scoped-env (if fn-params
                                         (append (cdr fn-params) type-env)
                                         current-env)))
-                    (for-each (lambda (sub) (walk sub scoped-env)) (cddr expr))))
+                    (for-each-sub (lambda (sub) (walk sub scoped-env)) (cddr expr))))
 
                  ;; (define name (lambda (params...) body...)) — scope param-types
                  ((and (eq? (car expr) 'define)
@@ -1512,7 +1521,7 @@
                          (scoped-env (if fn-params
                                         (append (cdr fn-params) type-env)
                                         current-env)))
-                    (for-each (lambda (sub) (walk sub scoped-env)) (cddr (caddr expr)))))
+                    (for-each-sub (lambda (sub) (walk sub scoped-env)) (cddr (caddr expr)))))
 
                  ;; Named-let: analyze with current scoped env
                  ((and (eq? (car expr) 'let)
@@ -1524,15 +1533,15 @@
                   ;; Continue walking sub-expressions
                   (when (pair? (car expr))
                     (walk (car expr) current-env))
-                  (for-each (lambda (sub) (when (pair? sub) (walk sub current-env)))
+                  (for-each-sub (lambda (sub) (when (pair? sub) (walk sub current-env)))
                             (cdr expr)))
 
                  ;; Generic: recurse into sub-expressions
                  (else
                   (when (pair? (car expr))
                     (walk (car expr) current-env))
-                  (for-each (lambda (sub) (when (pair? sub) (walk sub current-env)))
-                            (cdr expr)))))))
+                  (for-each-sub (lambda (sub) (when (pair? sub) (walk sub current-env)))
+                                (cdr expr)))))))
 
          ;; Every call to loop-name in its body has a monotonic argument.
          ;; A call inside a closure that may run in a later iteration has
@@ -1587,7 +1596,7 @@
                     (string-append "named-let \"" (symbol->string loop-name)
                       "\" has no reachable base case")))))))
 
-         (for-each (lambda (expr) (walk expr type-env)) exprs)
+         (for-each-sub (lambda (expr) (walk expr type-env)) exprs)
          (reverse violations)))))
 
   ;; ---------------------------------------------------------------
@@ -1846,7 +1855,7 @@
             ((and (memq (car expr) '(letrec letrec*))
                   (pair? (cdr expr))
                   (pair? (cadr expr)))
-             (for-each
+             (for-each-sub
                (lambda (binding)
                  (when (and (not result)
                             (pair? binding)
@@ -1854,7 +1863,7 @@
                    (set! result expr)))
                (cadr expr))
              ;; Recurse into the binding inits and the letrec body
-             (for-each (lambda (binding)
+             (for-each-sub (lambda (binding)
                          (when (and (pair? binding) (pair? (cdr binding)))
                            (search (cadr binding))))
                        (cadr expr))
@@ -1866,7 +1875,7 @@
         (when (pair? lst)
           (when (pair? (car lst)) (search (car lst)))
           (search-all (cdr lst))))
-      (for-each search exprs)
+      (for-each-sub search exprs)
       result))
 
   ;; Extract formals for a named function from the expression list.
@@ -1892,7 +1901,7 @@
             ((and (memq (car expr) '(letrec letrec*))
                   (pair? (cdr expr))
                   (pair? (cadr expr)))
-             (for-each
+             (for-each-sub
                (lambda (binding)
                  (when (and (not result)
                             (pair? binding)
@@ -1900,7 +1909,7 @@
                    (set! result (extract-formals binding))))
                (cadr expr))
              ;; Recurse into the binding inits and the letrec body
-             (for-each (lambda (binding)
+             (for-each-sub (lambda (binding)
                          (when (and (pair? binding) (pair? (cdr binding)))
                            (search (cadr binding))))
                        (cadr expr))
@@ -1912,7 +1921,7 @@
         (when (pair? lst)
           (when (pair? (car lst)) (search (car lst)))
           (search-all (cdr lst))))
-      (for-each search exprs)
+      (for-each-sub search exprs)
       result))
 
   ;; Analyze directly recursive functions for termination.
@@ -1938,7 +1947,7 @@
                    violations)))
 
          ;; Process each SCC
-         (for-each
+         (for-each-sub
            (lambda (scc)
              ;; Only handle direct recursion: single-node SCC with self-edge
              (when (and (= (length scc) 1)
@@ -2055,10 +2064,10 @@
             (let ((shadowed (if (symbol? (car expr))
                                 (append (form-binds expr) shadowed)
                                 shadowed)))
-              (for-each (lambda (sub) (when (pair? sub) (walk sub shadowed)))
+              (for-each-sub (lambda (sub) (when (pair? sub) (walk sub shadowed)))
                         expr))))
         (let ((top (define-names body-exprs)))
-          (for-each (lambda (e) (walk e top)) body-exprs))
+          (for-each-sub (lambda (e) (walk e top)) body-exprs))
         #f)))
 
   ;; Names bound around a definition's body: top-level defines, enclosing
@@ -2119,7 +2128,7 @@
         (when (pair? e)
           (walk e shadowed (or captured? (lambda-form? e)))))
       (define (walk-values es shadowed captured?)
-        (for-each (lambda (e) (walk-value e shadowed captured?)) es))
+        (for-each-sub (lambda (e) (walk-value e shadowed captured?)) es))
       ;; True when every use of name in exprs is the operator of a call
       ;; outside any lambda, define, named let, cond, case or do, and nothing there
       ;; rebinds name. Its lambda then runs only in this activation.
@@ -2171,17 +2180,17 @@
                 ;; Clauses are not applications: every element of one is
                 ;; an expression, so the call exemptions below never apply.
                 ((eq? keyword 'cond)
-                 (for-each (lambda (c) (when (list? c) (walk-values c shadowed captured?)))
+                 (for-each-sub (lambda (c) (when (list? c) (walk-values c shadowed captured?)))
                            (cdr expr)))
                 ((and (eq? keyword 'case) (pair? (cdr expr)))
                  (walk-value (cadr expr) shadowed captured?)
-                 (for-each (lambda (c)
+                 (for-each-sub (lambda (c)
                              (when (and (list? c) (pair? c))
                                (walk-values (cdr c) shadowed captured?)))
                            (cddr expr)))
                 ((and (eq? keyword 'do) (pair? (cdr expr)) (pair? (cddr expr)))
                  (when (list? (cadr expr))
-                   (for-each (lambda (spec)
+                   (for-each-sub (lambda (spec)
                                (when (list? spec)
                                  (walk-values (if (pair? spec) (cdr spec) '())
                                               shadowed captured?)))
@@ -2219,7 +2228,7 @@
                                         (not (memv i cbs)))))))
                      (loop (cdr subs) (+ i 1))))))))))
       (let ((top (define-names body-exprs)))
-        (for-each (lambda (e) (walk e top #f)) body-exprs))
+        (for-each-sub (lambda (e) (walk e top #f)) body-exprs))
       calls))
 
   ;; Check if a test expression references any formal parameter of the SCC functions.
@@ -2281,7 +2290,7 @@
 
                 ;; (cond (test body...) ...)
                 ((eq? (car expr) 'cond)
-                 (for-each
+                 (for-each-sub
                    (lambda (clause)
                      (when (and (pair? clause) (pair? (cdr clause)))
                        (let ((body (cdr clause)))
@@ -2289,7 +2298,7 @@
                                         (base-case-test? (car clause) vars))
                                     (not (contains-scc-call? body)))
                            (set! found #t))
-                         (for-each walk body))))
+                         (for-each-sub walk body))))
                    (cdr expr)))
 
                 ;; (when test body...) -- if body contains a recursive call,
@@ -2304,7 +2313,7 @@
                                 (not (contains-scc-call? test))
                                 (scc-test-references-param? test exprs scc-members))
                        (set! found #t))
-                     (for-each walk body))))
+                     (for-each-sub walk body))))
 
                 ;; (unless test body...) -- if body contains a recursive call,
                 ;; the implicit else (when test is true) is a no-op base case.
@@ -2317,14 +2326,14 @@
                                 (not (contains-scc-call? test))
                                 (scc-test-references-param? test exprs scc-members))
                        (set! found #t))
-                     (for-each walk body))))
+                     (for-each-sub walk body))))
 
                 (else
                  (when (pair? (car expr))
                    (walk (car expr)))
-                 (for-each (lambda (sub) (when (pair? sub) (walk sub)))
+                 (for-each-sub (lambda (sub) (when (pair? sub) (walk sub)))
                            (cdr expr)))))))
-        (for-each walk body-exprs))
+        (for-each-sub walk body-exprs))
 
       ;; The members without a base case of their own must not form a cycle.
       (let* ((defs (extract-definitions exprs))
@@ -2379,7 +2388,7 @@
                    violations)))
 
          ;; Process each multi-node SCC
-         (for-each
+         (for-each-sub
            (lambda (scc)
              (when (> (length scc) 1)
                (let* ((scc-names scc)
@@ -2407,7 +2416,7 @@
 
                  (cond
                    ((eq? progress 'limit)
-                    (for-each
+                    (for-each-sub
                       (lambda (name)
                         (add-violation! 'size-change-limit name
                           (or (find-definition-form exprs name)
@@ -2428,7 +2437,7 @@
                                                                 (string-append ", " (symbol->string (car names))))
                                                             acc)))))
                                        ")")))
-                      (for-each
+                      (for-each-sub
                         (lambda (name)
                           (add-violation! 'no-decreasing-arg name
                             (or (find-definition-form exprs name)
@@ -2450,7 +2459,7 @@
                                                                 (string-append ", " (symbol->string (car names))))
                                                             acc)))))
                                        ")")))
-                      (for-each
+                      (for-each-sub
                         (lambda (name)
                           (add-violation! 'no-base-case name
                             (or (find-definition-form exprs name)
@@ -2490,14 +2499,14 @@
        (check-hof-callbacks defs defined-names proven-terminating '()))
       ((defs defined-names proven-terminating user-hof-table)
        (let ((violations '()))
-         (for-each
+         (for-each-sub
            (lambda (def)
              (let* ((fname (car def))
                     (body (cdr def))
                     (builtin-edges (collect-hof-callback-edges body fname))
                     (user-edges (collect-user-hof-callback-edges body fname user-hof-table)))
                ;; Check built-in HOF callbacks
-               (for-each
+               (for-each-sub
                  (lambda (edge)
                    (let ((cb-sym (cdr edge)))
                      (when (memq cb-sym defined-names)
@@ -2517,7 +2526,7 @@
                  builtin-edges)
                ;; Check user-defined HOF callbacks — only when the HOF
                ;; itself is proven terminating (otherwise it is already flagged)
-               (for-each
+               (for-each-sub
                  (lambda (edge)
                    (let ((hof-name (cadr edge))
                          (cb-sym (caddr edge)))
@@ -2588,8 +2597,8 @@
             ((and (eq? (car e) 'define) (pair? (cdr e)))
              (count! (if (pair? (cadr e)) (car (cadr e)) (cadr e))))
             ((and (memq (car e) '(letrec letrec*)) (pair? (cdr e)) (list? (cadr e)))
-             (for-each (lambda (b) (when (pair? b) (count! (car b)))) (cadr e))))
-          (for-each count-binders! e)))
+             (for-each-sub (lambda (b) (when (pair? b) (count! (car b)))) (cadr e))))
+          (for-each-sub count-binders! e)))
 
       (define (node-name-like? name)
         (let ((str (symbol->string name)))
@@ -2828,7 +2837,7 @@
                (else (rn-generic e env)))))))
 
       (note-syms! exprs)
-      (for-each count-binders! exprs)
+      (for-each-sub count-binders! exprs)
       ;; Top level: only names the analysis would misread are renamed.
       (let ((top-env
               (fold-left (lambda (env name)

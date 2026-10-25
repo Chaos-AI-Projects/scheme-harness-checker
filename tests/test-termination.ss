@@ -2315,6 +2315,34 @@
 (assert-no-violations "hc-2 r15: unless with an upper-bound test: accepted"
   (check-source-termination "(define (f i) (unless (>= i 10) (f (+ i 1)))) (f 0)"))
 
+;; HC-3: dotted formals crashed check-termination ("not a proper list").
+(define (check-source-termination/no-crash source)
+  (guard (e (#t (list 'crash)))
+    (check-source-termination source)))
+(assert-no-violations "hc-3 rest args, non-recursive: accepted"
+  (check-source-termination/no-crash "(define (f . args) (length args)) (display (f 1 2))"))
+(assert-no-violations "hc-3 required plus rest args, non-recursive: accepted"
+  (check-source-termination/no-crash "(define (f a . rest) (cons a rest)) (display (f 1 2))"))
+(assert-no-violations "hc-3 dotted lambda formals: accepted"
+  (check-source-termination/no-crash "(define g (lambda (a . r) a)) (display ((lambda (x . y) (g x)) 1 2))"))
+(assert-true "hc-3 rest args through apply loops: rejected"
+  (let ((v (check-source-termination/no-crash "(define (f . args) (apply f args)) (f 1)")))
+    (and (pair? v) (not (equal? v (list (quote crash)))))))
+(assert-true "hc-3 rest args, direct self call loops: rejected"
+  (let ((v (check-source-termination/no-crash "(define (f a . rest) (f a)) (f 1)")))
+    (and (pair? v) (not (equal? v (list (quote crash)))))))
+(assert-true "hc-3 internal define with rest args: no crash"
+  (list? (guard (e (#t #f)) (check-source-termination "(define (g n) (define (h a . r) (if (<= a 0) 0 (h (- a 1)))) (h n)) (display (g 3))"))))
+(assert-true "hc-3 letrec lambda with rest args: no crash"
+  (list? (guard (e (#t #f)) (check-source-termination "(define (g n) (letrec ((h (lambda (a . r) (if (<= a 0) 0 (h (- a 1)))))) (h n))) (display (g 3))"))))
+(assert-no-violations "hc-3 do loop inside a rest-args function: accepted"
+  (check-source-termination/no-crash "(define (g . r) (do ((i 0 (+ i 1))) ((>= i 3) r))) (display (g 1))"))
+(assert-true "hc-3 rest param shadows the measured formal: rejected"
+  (let ((v (check-source-termination/no-crash "(define (f x) (if (null? x) 0 ((lambda (a . x) (f (cdr x))) 1 x x))) (f '(1))")))
+    (and (pair? v) (not (equal? v (list (quote crash)))))))
+(assert-no-violations "hc-3 rest-args lambda whose first formal names a user HOF: accepted"
+  (check-source-termination/no-crash "(define (app h x) (h x)) (define (k a) ((lambda (app . s) app) 1 2)) (display (k 1))"))
+
 ;; ============================================================
 ;; Results
 ;; ============================================================

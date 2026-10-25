@@ -953,14 +953,60 @@
       (else (or (expr-references-any? (car expr) symbols)
                 (expr-references-any? (cdr expr) symbols)))))
 
+  ;; The (test . known) guards that hold while a do-loop keeps running:
+  ;; its exit test is false, and so is each disjunct of an or. A mirrored
+  ;; ascent test (<= c x) or (< c x) also gets its flipped form, which
+  ;; upper-bound-base-case-test? recognises.
+  (define (do-continue-guards test)
+    (cond
+      ((and (pair? test) (list? test) (eq? (car test) 'or))
+       (apply append (map do-continue-guards (cdr test))))
+      ((and (pair? test) (list? test) (= (length test) 3) (memq (car test) '(< <=)))
+       (list (cons test #f)
+             (cons (list (if (eq? (car test) '<) '> '>=) (caddr test) (cadr test)) #f)))
+      (else (list (cons test #f)))))
+
+  ;; Some loop variable x moves toward the exit test on every step, as
+  ;; Phases 5 and 6 require of a recursive call (HC-5). Its step is
+  ;; numeric descent under a lower stop test on x, ascent under an
+  ;; upper-bound test on x, or structural descent with a test that
+  ;; mentions x, and no set! in the do-form assigns x. A bound must be
+  ;; stable: only pure-bound-ops over literals, unstepped loop variables
+  ;; and names no set! in the program assigns (assigned).
+  (define (do-steps-progress? do-expr assigned)
+    (let* ((bindings (filter (lambda (b) (and (pair? b) (symbol? (car b))))
+                             (cadr do-expr)))
+           (vars (map car bindings))
+           (steps (map (lambda (b)
+                         (if (and (pair? (cdr b)) (pair? (cddr b))) (caddr b) (car b)))
+                       bindings))
+           (test (car (caddr do-expr)))
+           (guards (do-continue-guards test))
+           (bound-ok? (make-bound-ok? vars (list (cons 'do steps)) assigned '()))
+           (reset (set!-targets do-expr)))
+      (exists
+        (lambda (x s)
+          (and (not (memq x reset))
+               (or (and (numeric-step? s)
+                        (decreasing-expr? s x)
+                        (descent-guarded? x guards bound-ok?))
+                   (and (increasing-expr? s x)
+                        (ascent-guarded? x guards bound-ok?))
+                   (and (not (numeric-step? s))
+                        (decreasing-expr? s x)
+                        (expr-references-any? test (list x))))))
+        vars steps)))
+
   ;; Analyze all do-forms in a list of expressions for termination issues.
   ;; Checks:
   ;;   - termination test is not trivially false (#f)
   ;;   - at least one loop variable has a step expression
   ;;   - termination test references at least one loop variable
+  ;;   - some step moves a tested variable toward the exit test (HC-5)
   ;; Returns a list of termination-violation records with kind 'infinite-loop.
   (define (analyze-do-forms exprs)
-    (let ((violations '()))
+    (let ((violations '())
+          (assigned (set!-targets exprs)))
       (define (add-violation! do-expr reason)
         (set! violations
           (cons (make-termination-violation 'infinite-loop #f do-expr reason)
@@ -1023,7 +1069,14 @@
                     has-any-step?
                     (not (expr-references-any? (car termination) vars)))
                (add-violation! do-expr
-                 "do-form exit test does not reference any loop variable"))))))
+                 "do-form exit test does not reference any loop variable"))
+
+              ;; No loop variable can move the exit test (HC-5)
+              ((and (pair? termination)
+                    (list? bindings)
+                    (not (do-steps-progress? do-expr assigned)))
+               (add-violation! do-expr
+                 "do-form has no step that moves a tested variable toward the exit test"))))))
 
       (for-each-sub walk exprs)
       (reverse violations)))

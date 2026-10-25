@@ -35,7 +35,7 @@ Verifies that arguments passed to whitelisted functions satisfy known constraint
 
 Detects programs that may not terminate (infinite loops / unbounded recursion) using a 6-phase analysis pipeline:
 
-1. **Do-loop analysis** — Checks `(do ...)` for non-trivial termination tests, step expressions, and exit-test variable references
+1. **Do-loop analysis** — Checks that some loop variable's step moves it toward the exit test, by the rules recursion uses. It counts down under a lower stop such as `(zero? n)`, counts up under a stable upper bound such as `(>= i (vector-length v))`, or walks a list with `cdr` under a test that mentions it. A `set!` of that variable in the loop, a bound that a step or `set!` changes, and a loop with no variables are all rejected. An `or` exit test needs one such disjunct; an `and` test gives no stop
 2. **Named-let analysis** — Checks for decreasing arguments (`cdr`, `sub1`, `- x 1`) and reachable base cases
 3. **Direct recursion** — SCC detection via Tarjan's algorithm, size-change termination, base case validation
 4. **Mutual recursion** — Multi-node SCC analysis, size-change termination across the whole SCC, and at least one base case. As in direct recursion, a base case is a branch guarded by a base-case test on a formal, such as `(= n 0)` or `(null? x)`. A member whose only group calls are list-HOF callbacks also has one, since the HOF stops at the empty list

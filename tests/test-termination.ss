@@ -450,7 +450,7 @@
 
 (assert-no-violations "do with all bindings having steps"
   (check-source-termination
-    "(do ((i 0 (+ i 1)) (j 10 (- j 1))) ((= i j)) (display i))"))
+    "(do ((i 0 (+ i 1)) (j 10 (- j 1))) ((= i 10)) (display j))"))
 
 (assert-no-violations "do nested inside define passes when valid"
   (check-source-termination
@@ -2384,6 +2384,55 @@
   "(define (k) ((lambda (s) (s s 3 1)) (lambda (self n m) (if (= m 0) 0 (self self (- n 1) m))))) (display (k))")
 (assert-no-violations "hc-4 anon: guarded countdown: accepted"
   (check-source-termination "(define (k) ((lambda (s) (s s 3)) (lambda (self n) (if (= n 0) 0 (self self (- n 1)))))) (display (k))"))
+
+;; ============================================================
+;; HC-5: a do-loop step must move a tested variable toward the exit test
+;; ============================================================
+(display "=== HC-5: do-loop step progress ===") (newline)
+
+(assert-rejected "hc-5 step leaves the tested variable unchanged: rejected"
+  "(define (g) (do ((i 0 i)) ((>= i 3) 0))) (display (g))")
+(assert-rejected "hc-5 descent under an upper-bound exit test: rejected"
+  "(do ((i 0 (- i 1))) ((>= i 3) 0))")
+(assert-rejected "hc-5 ascent under a lower-bound exit test: rejected"
+  "(do ((i 0 (+ i 1))) ((<= i -1) 0))")
+(assert-rejected "hc-5 stepped variable is not the tested one: rejected"
+  "(do ((i 0 (+ i 1)) (j 0 j)) ((>= j 3) 0))")
+(assert-rejected "hc-5 bound is a stepped loop variable: rejected"
+  "(do ((i 0 (+ i 1)) (n 3 (+ n 1))) ((>= i n) 0))")
+(assert-rejected "hc-5 two stepped variables that can cross: rejected"
+  "(do ((i 0 (+ i 1)) (j 11 (- j 1))) ((= i j) 0))")
+(assert-rejected "hc-5 body resets the progress variable: rejected"
+  "(do ((i 0 (+ i 1))) ((>= i 3) 0) (set! i 0))")
+(assert-rejected "hc-5 bound assigned in the body: rejected"
+  "(define n 3) (define (g) (do ((i 0 (+ i 1))) ((>= i n) 0) (set! n (+ n 1)))) (g)")
+(assert-rejected "hc-5 bound is a user call: rejected"
+  "(define (f) 3) (do ((i 0 (+ i 1))) ((>= i (f)) 0))")
+(assert-rejected "hc-5 do-loop with no variables: rejected"
+  "(define (g) (do () ((= 1 2) 0))) (g)")
+(assert-rejected "hc-5 conjunction gives no stop: rejected"
+  "(do ((i 0 (+ i 1))) ((and (>= i 3) (< i 0)) 0))")
+
+(assert-no-violations "hc-5 count up to a literal: accepted"
+  (check-source-termination "(do ((i 0 (+ i 1))) ((>= i 3) 0))"))
+(assert-no-violations "hc-5 mirrored upper bound: accepted"
+  (check-source-termination "(do ((i 0 (+ i 1))) ((<= 3 i) 0))"))
+(assert-no-violations "hc-5 countdown to zero: accepted"
+  (check-source-termination "(do ((n 10 (- n 1))) ((zero? n) 0))"))
+(assert-no-violations "hc-5 countdown under a negated pass test: accepted"
+  (check-source-termination "(do ((n 10 (sub1 n))) ((not (> n 0)) 0))"))
+(assert-no-violations "hc-5 mirrored lower bound: accepted"
+  (check-source-termination "(do ((n 10 (- n 1))) ((>= 0 n) 0))"))
+(assert-no-violations "hc-5 list walk: accepted"
+  (check-source-termination "(do ((l '(1 2 3) (cdr l)) (s 0 (+ s (car l)))) ((null? l) s))"))
+(assert-no-violations "hc-5 disjunction with one progressing test: accepted"
+  (check-source-termination "(do ((i 0 (+ i 1)) (l '(1 2) (cdr l))) ((or (eq? l 'x) (>= i 10)) i))"))
+(assert-no-violations "hc-5 vector-length bound: accepted"
+  (check-source-termination "(define (g v) (do ((i 0 (+ i 1))) ((>= i (vector-length v)) 0))) (g (vector 1 2))"))
+(assert-no-violations "hc-5 unstepped loop variable as bound: accepted"
+  (check-source-termination "(do ((i 0 (+ i 1)) (n 5)) ((>= i n) i))"))
+(assert-no-violations "hc-5 set! of an unrelated variable: accepted"
+  (check-source-termination "(define (g) (let ((acc 0)) (do ((i 0 (+ i 1))) ((>= i 3) acc) (set! acc (+ acc i))))) (g)"))
 
 ;; ============================================================
 ;; Results

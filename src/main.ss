@@ -2,9 +2,12 @@
 ;; CLI entry point for the whitelist checker, type checker, and termination analysis.
 ;;
 ;; Usage:
-;;   scheme --libdirs src:<packrat-extended-path>:<packrat-examples-path> --program src/main.ss [--no-termination] [--termination-depth N] [--tool-schemas <path>] <source-file> <whitelist-file> [<type-signatures-file>]
+;;   scheme --libdirs src:<packrat-extended-path>:<packrat-examples-path> --program src/main.ss [--no-types] [--no-termination] [--termination-depth N] [--tool-schemas <path>] <source-file> <whitelist-file> [<type-signatures-file>]
 ;;
 ;; Flags:
+;;   --no-types             Skip the type passes (pass 1 constraints, pass 2 type check).
+;;                          Signatures still reach termination analysis, but pass 1's
+;;                          inferred parameter types do not.
 ;;   --no-termination       Disable termination analysis pass (enabled by default)
 ;;   --termination-depth N  Block programs with more than N definitions (emits definition-limit-exceeded violation)
 ;;   --tool-schemas <path>  Load tool JSON Schemas from file, merge with type signatures
@@ -76,6 +79,7 @@
   (let* ((parsed (parse-flags args))
          (flags (car parsed))
          (positional (cdr parsed))
+         (types-enabled? (not (has-flag? flags "--no-types")))
          (termination-enabled? (not (has-flag? flags "--no-termination")))
          (termination-depth-str (get-flag-value flags "--termination-depth"))
          (termination-depth (if termination-depth-str
@@ -83,7 +87,7 @@
                                 #f))
          (tool-schemas-path (get-flag-value flags "--tool-schemas")))
     (when (< (length positional) 2)
-      (display "Usage: scheme --libdirs src --program src/main.ss [--no-termination] [--termination-depth N] [--tool-schemas <path>] <source-file> <whitelist-file> [<type-signatures-file>]")
+      (display "Usage: scheme --libdirs src --program src/main.ss [--no-types] [--no-termination] [--termination-depth N] [--tool-schemas <path>] <source-file> <whitelist-file> [<type-signatures-file>]")
       (newline)
       (exit 1))
     (let* ((source-path (car positional))
@@ -123,7 +127,7 @@
     (let ((type-errors '())
           (constraint-errors '())
           (param-types '()))
-      (when (not (null? signatures))
+      (when (and types-enabled? (not (null? signatures)))
         (let* (;; Pass 1: infer parameter constraints
                (pass1-result (infer-param-constraints exprs signatures))
                (p1-types (car pass1-result))

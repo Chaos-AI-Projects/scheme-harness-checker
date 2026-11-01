@@ -102,6 +102,7 @@ scheme --libdirs src:<path-to-packrat-extended> --program src/main.ss [options] 
 
 | Flag | Description |
 |------|-------------|
+| `--no-types` | Skip both type passes, so only whitelist and termination violations are reported. Signatures still reach termination analysis; pass 1's inferred parameter types do not. |
 | `--no-termination` | Skip the termination analysis phase |
 | `--termination-depth N` | Block programs with more than N definitions (emits a definition-limit-exceeded violation; default: no limit) |
 | `--tool-schemas <path>` | Load tool type definitions from a JSON Schema file for parameter validation |
@@ -174,6 +175,7 @@ harness-checker/
 │   ├── test-cfa.ss                     # 0CFA call-site table tests
 │   ├── test-sct.ss                     # Size-change graph tests
 │   ├── test-type-env-builder.ss        # Type environment builder tests
+│   ├── test-cli.sh                     # CLI flag tests (fixtures in cli/)
 │   ├── sample-safe.ss                   # Example safe program
 │   └── sample-unsafe.ss                 # Example unsafe program
 └── README.md                            # This file
@@ -202,6 +204,9 @@ scheme --libdirs ../src:<path-to-packrat-extended> --program test-type-env-build
 # 0CFA and size-change termination tests
 scheme --libdirs ../src:<path-to-packrat-extended> --program test-cfa.ss
 scheme --libdirs ../src:<path-to-packrat-extended> --program test-sct.ss
+
+# CLI flag tests, run from the project root
+PACKRAT=<path-to-packrat-extended> tests/test-cli.sh
 ```
 
 ## Scope

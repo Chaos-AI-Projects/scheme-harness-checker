@@ -13,7 +13,8 @@ export type TerminationKind =
   | "named-let-alias"
   | "duplicate-definition"
   | "definition-limit-exceeded"
-  | "cyclic-datum";
+  | "cyclic-datum"
+  | "improper-list";
 
 export interface TerminationViolation {
   kind: TerminationKind;

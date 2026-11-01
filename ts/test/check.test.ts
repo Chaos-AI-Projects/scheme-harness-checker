@@ -367,3 +367,217 @@ test("HTML-like comment tokens are rejected, a script parser reads them as comme
 test("a Math call is a numeric key", () => {
   assertClean(`function median(xs: number[]): number { const s = xs.slice().sort((a, b) => a - b); return s[Math.floor(s.length / 2)]; }`);
 });
+
+test("termination runs on the lowered program: a recursion that never shrinks is rejected", () => {
+  const result = checkTypeScript(`
+    function count(n: number): number {
+      if (n === 0) return 0;
+      return count(n + 1);
+    }
+  `, { toolDeclarations: TOOLS });
+  assert.equal(result.ok, false);
+  const v = result.violations.find((x) => x.kind === "no-decreasing-arg");
+  assert.ok(v, `expected no-decreasing-arg, got ${JSON.stringify(result.violations)}`);
+  assert.match(v.message, /\bcount\b/);
+  assert.doesNotMatch(v.message, /js\./);
+  assert.equal(v.line, 2);
+});
+
+test("termination runs on the lowered program: a shrinking recursion is accepted", () => {
+  assertClean(`
+    function count(n: number): number {
+      if (n <= 0) return 0;
+      return 1 + count(n - 1);
+    }
+    console.log(count(3));
+  `);
+});
+
+test("a construct the lowering does not know is unsupported syntax", () => {
+  assertRejected(`const xs = [3, 1]; xs.unshift(0);`, "unsupported-syntax");
+});
+
+// Review of PR #760: each program below passed with ok: true and does not terminate in node.
+test("string + and string comparisons are not read as numeric progress", () => {
+  assert.equal(checkTypeScript(`for (let s = "a"; s < "b"; s += 1) {}`, { toolDeclarations: TOOLS }).ok, false);
+  assert.equal(checkTypeScript(`let s = "a"; while (s < "b") { s += 1; }`, { toolDeclarations: TOOLS }).ok, false);
+  assert.equal(checkTypeScript(`
+    async function f(s: string): Promise<number> { if (s >= "b") return 0; await 0; return f(s + 1); }
+    f("a");
+  `, { toolDeclarations: TOOLS }).ok, false);
+});
+
+test("a while whose variable a closure assigns is rejected", () => {
+  assert.equal(checkTypeScript(`
+    function g(): number {
+      let i = 0;
+      const reset = (): void => { i = 0; };
+      while (i < 10) { reset(); i++; }
+      return i;
+    }
+  `, { toolDeclarations: TOOLS }).ok, false);
+  assert.equal(checkTypeScript(`
+    let i = 0;
+    const back = (): void => { i = i - 1; };
+    while (i < 10) { back(); i++; }
+  `, { toolDeclarations: TOOLS }).ok, false);
+});
+
+test("a pushed array returned from a nested function is an alias", () => {
+  assert.equal(checkTypeScript(`
+    function g(): number {
+      const a = [1];
+      const get = (): number[] => { return a; };
+      for (const x of get()) { a.push(x); }
+      return 0;
+    }
+  `, { toolDeclarations: TOOLS }).ok, false);
+});
+
+test("a for whose counter a closure assigns is rejected", () => {
+  assert.equal(checkTypeScript(`
+    for (let i = 0; i < 10; i++) { const reset = (): void => { i = 0; }; reset(); }
+  `, { toolDeclarations: TOOLS }).ok, false);
+});
+
+// Review round 2 of PR #760: a type can say number while the value is a string, and then + concatenates.
+test("+ is numeric progress only when both operands are numbers by construction", () => {
+  const poisoned = (loop: string) => `
+    function main(): number {
+      let x: number | string = 0;
+      const poison = () => { x = "-1"; };
+      poison();
+      let k = 0;
+      ${loop}
+      return k;
+    }`;
+  assert.equal(checkTypeScript(poisoned(`for (let i = x; i < 10; i += 1) { k = k + 1; }`), { toolDeclarations: TOOLS }).ok, false);
+  assert.equal(checkTypeScript(poisoned(`let i = x; while (i < 10) { i += 1; }`), { toolDeclarations: TOOLS }).ok, false);
+  assert.equal(checkTypeScript(`
+    function count(x: number): number { let k = 0; for (let i = x; i < 10; i += 1) { k = k + 1; } return k; }
+    function main(): number { const b: { f(x: string | number): number } = { f: count }; const f = b.f; return f("-1"); }
+  `, { toolDeclarations: TOOLS }).ok, false);
+  assert.equal(checkTypeScript(`
+    function up(i: number): number { if (i >= 10) return 0; return up(i + 1); }
+  `, { toolDeclarations: TOOLS }).ok, false);
+  // ++ always converts to a number, and a counter only ever assigned numbers may step by +=.
+  assert.equal(checkTypeScript(poisoned(`for (let i = x; i < 10; i++) { k = k + 1; }`), { toolDeclarations: TOOLS }).ok, true);
+  assert.equal(checkTypeScript(`let k = 0; for (let i = 0; i < 10; i += 2) { k = k + 1; }`, { toolDeclarations: TOOLS }).ok, true);
+});
+
+// Review round 3 of PR #760: a narrowing kept across a call lets a record pass as an array, and
+// then .map is the record's own function, not the Scheme HOF the lowering wrote.
+test("an object literal may not define a member the lowering reads as an array's", () => {
+  assert.equal(checkTypeScript(`
+    function go(cb: (v: number) => number): number[] { return lie().map(cb); }
+    function lie(): number[] {
+      let z: number[] | { tag: number } = [1];
+      const p = () => { z = rec; };
+      p();
+      return z;
+    }
+    const rec = { tag: 1, map: (cb: (v: number) => number): number[] => go(cb) };
+  `, { toolDeclarations: TOOLS }).ok, false);
+  for (const key of ["map", "slice", "length", "join", "sort", "push", '"0"']) {
+    const r = checkTypeScript(`const o = { ${key}: 1 };`, { toolDeclarations: TOOLS });
+    assert.equal(r.ok, false, key);
+    assert.equal(r.violations[0].kind, "unsupported-syntax", key);
+  }
+});
+
+// Review round 4 of PR #760: a callback's type can claim one parameter while the function takes the
+// array as its third, so the arity a HOF lowering needs comes from the function's own text.
+test("a HOF callback's arity is read from its definition, not its type", () => {
+  assert.equal(checkTypeScript(`
+    async function main(): Promise<number> {
+      const a: number[] = [1];
+      let holder: number[] = [];
+      let f: ((v: number) => void) | ((v: number, i: number, arr: number[]) => number) = (v: number): void => {};
+      const set = (): void => { f = (v: number, i: number, arr: number[]): number => { holder = arr; return 0; }; };
+      set();
+      a.forEach(f);
+      let n = 0;
+      for (const x of holder) { a.push(x); }
+      return n;
+    }
+  `, { toolDeclarations: TOOLS }).ok, false);
+  // An arrow at the call, a const bound to one, and a function declaration all keep their arity.
+  assert.equal(checkTypeScript(`
+    function inc(x: number): number { return x - 1; }
+    const pos = (x: number): boolean => x > 0;
+    const xs = [1, 2];
+    const ys = xs.map(inc).filter(pos).map((x: number) => x * 2);
+  `, { toolDeclarations: TOOLS }).ok, true);
+});
+
+// Review round 5 of PR #760: on a shorthand property the checker names the property, not the
+// variable, so { a } must still count as a use of a pushed array.
+test("a shorthand property is an alias of a pushed array", () => {
+  assert.equal(checkTypeScript(`
+    function main(): number {
+      const a: number[] = [1];
+      const o = { a };
+      for (const x of o.a) { a.push(x); }
+      return a.length;
+    }
+  `, { toolDeclarations: TOOLS }).ok, false);
+});
+
+// Review round 6 of PR #760. JS [].slice(1) is [], a fixed point, so slice(1) and an array rest are
+// no decrease. And a method signature is bivariant, which lets a string reach an array parameter,
+// so [0] on it is no decrease either.
+test("slice(1) and an array rest are not a decrease, [] is their fixed point", () => {
+  assert.equal(checkTypeScript(`
+    function f(xs: number[], n: number): number {
+      if (n < 0) return 0;
+      return f(xs.slice(1), n + 1);
+    }
+    f([], 0);
+  `, { toolDeclarations: TOOLS }).ok, false);
+  assert.equal(checkTypeScript(`
+    function g(xs: number[], n: number): number {
+      if (n < 0) return 0;
+      const [, ...t] = xs;
+      return g(t, n + 1);
+    }
+    g([], 0);
+  `, { toolDeclarations: TOOLS }).ok, false);
+});
+
+test("a method signature is unsupported, its parameters are bivariant", () => {
+  assertRejected(`
+    function f(x: unknown[], n: number): number {
+      if (n < 0) return 0;
+      const o: { m(x: unknown, n: number): number } = { m: f };
+      const m = o.m;
+      return m(x[0], n + 1);
+    }
+    f(["a"], 0);
+  `, "unsupported-syntax");
+});
+
+// Review round 7 of PR #760. A type can still say array while the value is a string, through an
+// optional property, an index signature, {} or a narrowing kept across a call, and "a"[0] is "a".
+// So an element read is no decrease, whatever the type says.
+test("an element read is not a decrease, a string can pass as an array", () => {
+  for (const lie of [
+    `const o1 = { a: "str" }; const o2: {} = o1; const o3: { [k: string]: never[] } = o2; f(o3.a, 0);`,
+    `let v: string | never[] = []; function g(): number { v = "a"; return 0; } if (Array.isArray(v)) { g(); f(v, 0); }`,
+  ]) {
+    assert.equal(checkTypeScript(`
+      function f(x: never[], n: number): number {
+        if (n < 0) return 0;
+        return f(x[0], n + 1);
+      }
+      ${lie}
+    `, { toolDeclarations: TOOLS }).ok, false, lie);
+  }
+  assert.equal(checkTypeScript(`
+    function g(x: never[], n: number): number {
+      if (n < 0) return 0;
+      const [h] = x;
+      return g(h, n + 1);
+    }
+    const o1 = { a: "str" }; const o2: {} = o1; const o3: { [k: string]: never[] } = o2; g(o3.a, 0);
+  `, { toolDeclarations: TOOLS }).ok, false);
+});

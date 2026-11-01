@@ -1,11 +1,16 @@
 // checkTypeScript(): the TypeScript front-end of the harness checker. It runs the subset gate,
 // then compiles the program in strict mode against data/ts-safe.d.ts as the only lib, so an
-// undeclared global or member is a compile error. Termination is added by a later step.
+// undeclared global or member is a compile error. A program that passes is lowered to the IR and the
+// termination port judges that.
 
 import { readFileSync } from "node:fs";
 import ts from "typescript";
+import { lower, type Lowered } from "./lower.ts";
 import { declaredNames } from "./names.ts";
 import { checkSubset } from "./subset.ts";
+import { isSym, type Datum } from "./sexp.ts";
+import { checkTermination } from "./termination/check.ts";
+import type { TerminationViolation } from "./termination/violation.ts";
 import type { Violation, ViolationKind } from "./violation.ts";
 
 export type { Violation, ViolationKind } from "./violation.ts";
@@ -52,6 +57,49 @@ const LIB_OBJECTS = new Set([...LIB_NAMES.values].filter((n) => !["NaN", "Infini
 const NOT_WHITELISTED = new Set([2304, 2552, 2339, 2550, 2551, 2576, 2582, 2583, 2584, 2585, 2591, 2693, 2867, 2868]);
 
 export function checkTypeScript(code: string, options: CheckOptions = {}): CheckResult {
+  const gated = gate(code, options);
+  if (gated.violations.length > 0) return result(gated.violations);
+  const lowered = lower(gated.program, gated.checker!, numericKeys(gated.program, gated.checker!));
+  if (lowered.violations.length > 0) return result(lowered.violations);
+  return result(checkTermination(lowered.ir).map((v) => fromTermination(v, gated.program)));
+}
+
+// Lowering prefixes every user name with `js.`, which no TypeScript identifier contains, so the
+// prefix comes off for the report. The violation is placed at the declaration of the function it
+// names; a renamed local or a do-loop has none, and is placed at the start of the program.
+function fromTermination(v: TerminationViolation, sf: ts.SourceFile): Violation {
+  const unprefix = (s: string) => s.replace(/(^|[^\w$.%])js\./g, "$1");
+  const fn = v.function !== null && isSym(v.function as Datum) ? unprefix(String(v.function.name)) : null;
+  const at = fn === null ? undefined : declarationOf(sf, fn);
+  const { line, character } = at ? sf.getLineAndCharacterOfPosition(at.getStart(sf)) : { line: 0, character: 0 };
+  const message = fn === null ? unprefix(v.reason) : `${fn}: ${unprefix(v.reason)}`;
+  return { kind: v.kind, message, line: line + 1, column: character + 1 };
+}
+
+function declarationOf(sf: ts.SourceFile, name: string): ts.Node | undefined {
+  let found: ts.Node | undefined;
+  const visit = (node: ts.Node): void => {
+    if (found) return;
+    if ((ts.isFunctionDeclaration(node) || ts.isVariableDeclaration(node)) &&
+        node.name && ts.isIdentifier(node.name) && node.name.text === name) {
+      found = node;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sf);
+  return found;
+}
+
+/** The IR of a program that passes every gate, else the gates' violations and no IR (HC-18). */
+export function lowerTypeScript(code: string, options: CheckOptions = {}): Lowered {
+  const gated = gate(code, options);
+  if (gated.violations.length > 0) return { ir: [], violations: gated.violations };
+  return lower(gated.program, gated.checker!, numericKeys(gated.program, gated.checker!));
+}
+
+function gate(code: string, options: CheckOptions): { program: ts.SourceFile; violations: Violation[]; checker?: ts.TypeChecker } {
+  const result = (violations: Violation[], checker?: ts.TypeChecker) => ({ program, violations, checker });
   const program = ts.createSourceFile(PROGRAM_PATH, code, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
 
   const syntax = (program as unknown as { parseDiagnostics: ts.Diagnostic[] }).parseDiagnostics;
@@ -87,7 +135,8 @@ export function checkTypeScript(code: string, options: CheckOptions = {}): Check
     fromDiagnostic(d, classify(d.code)));
   if (typeErrors.length > 0) return result(typeErrors);
 
-  return result(checkTyped(program, tsProgram.getTypeChecker()));
+  const checker = tsProgram.getTypeChecker();
+  return result(checkTyped(program, checker), checker);
 }
 
 function compile(tools: ts.SourceFile, program: ts.SourceFile) {
@@ -139,7 +188,7 @@ const ASSIGNING = new Set<ts.SyntaxKind>([
 // program store "constructor" where number[] is declared. So a dynamic member key is allowed only
 // when it is a number at run time by construction: arithmetic that coerces, or a local variable
 // whose every assignment is one.
-function numericKeys(sf: ts.SourceFile, checker: ts.TypeChecker): (key: ts.Expression) => boolean {
+export function numericKeys(sf: ts.SourceFile, checker: ts.TypeChecker): (key: ts.Expression) => boolean {
   // Fail closed: every occurrence of a variable in a write position is recorded. Only a whole,
   // bare target of = or a compound operator keeps its value; any other write is non-numeric.
   const writes = new Map<ts.Symbol, (ts.Expression | undefined)[]>();

@@ -54,6 +54,25 @@ test("shared but acyclic structure is accepted", () => {
   assert.deepEqual(checkTermination([[sym("quote"), [shared, shared]]]), []);
 });
 
+test("an improper list in code position rejects the program before analysis", () => {
+  // Chez raises "not a proper list" on these; the port must reject rather than analyse on.
+  for (const source of [
+    "((lambda (s) (s s) . 0) (lambda (s) (s s) . 0))",
+    "(define (f x) (f x) . 1) (f 1)",
+    "(define (g x) (+ x . 1))",
+    "(define (h x) (let ((y x) . 2) y))",
+  ]) {
+    const vs = checkTermination(readAll(source));
+    assert.deepEqual(vs.map((v) => [v.kind, v.function]), [["improper-list", null]], source);
+  }
+});
+
+test("rest formals and quoted pairs are not code position", () => {
+  assert.deepEqual(kinds("(define (f . args) args) (f 1 2)"), []);
+  assert.deepEqual(kinds("(define (g a . rest) ((lambda (x . ys) x) a rest)) (g 1)"), []);
+  assert.deepEqual(kinds("(define (h) (quote (1 . 2))) (h)"), []);
+});
+
 test("more definitions than max-definitions blocks the program", () => {
   assert.deepEqual(kinds("(define (f) 1) (define (g) 2)", 1), ["definition-limit-exceeded"]);
   assert.deepEqual(kinds("(define (f) 1) (define (g) 2)", 2), []);

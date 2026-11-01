@@ -58,7 +58,10 @@ const BINARY_OPERATORS = new Set<ts.SyntaxKind>([
 // Names the compiler binds even with no lib loaded.
 const BUILTIN_GLOBALS = new Set(["globalThis", "Symbol"]);
 
-// Type positions are erased at run time, so they are allowed apart from `any` and `import(...)`.
+// Type positions are erased at run time, so they are allowed apart from `any`, `import(...)` and
+// method signatures. A method signature's parameters are bivariant even under strictFunctionTypes,
+// so `{ m(x: unknown): R }` accepts a function of `unknown[]` and a string reaches its array
+// parameter. The lowering no longer trusts an array type either, so this ban is one layer of two.
 const DISALLOWED_TYPES = new Set<ts.SyntaxKind>([K.ImportType]);
 
 // Comment directives that change what the compiler checks or which files it loads.
@@ -286,6 +289,10 @@ export function checkSubset(sf: ts.SourceFile, ctx: SubsetContext): Violation[] 
     }
     if (ts.isTypePredicateNode(node)) {
       report(node, "cast", "type predicates and asserts signatures are forbidden");
+      return;
+    }
+    if (ts.isMethodSignature(node)) {
+      report(node, "unsupported-syntax", "a method signature's parameters are bivariant; write m: (x: T) => R");
       return;
     }
     if (DISALLOWED_TYPES.has(node.kind)) {

@@ -18,6 +18,9 @@ import { analyzeNamedLetForms } from "./namedlet.ts";
 import type { TerminationViolation } from "./violation.ts";
 
 const DEFINE = sym("define");
+const LAMBDA = sym("lambda");
+const CASE_LAMBDA = sym("case-lambda");
+const QUOTE = sym("quote");
 
 /**
  * termination.ss:3259 check-termination. maxDefinitions, when set, blocks a program with more
@@ -31,6 +34,17 @@ export function checkTermination(exprs: readonly Datum[], maxDefinitions: number
         function: null,
         expr: false,
         reason: "source contains a cyclic datum (#n= label); descent on car, cdr and vector-ref assumes acyclic data",
+      },
+    ];
+  }
+  const improper = improperCodeList(exprs as Datum[]);
+  if (improper !== null) {
+    return [
+      {
+        kind: "improper-list",
+        function: null,
+        expr: improper,
+        reason: "an improper list stands where code is expected; Scheme raises \"not a proper list\" on it",
       },
     ];
   }
@@ -60,6 +74,49 @@ export function cyclicDatum(x: Datum): boolean {
     return found;
   };
   return walk(x);
+}
+
+/**
+ * The first improper list in code position, or null. Chez raises on one rather than analysing it,
+ * so the port rejects it outright and "Chez raises" always means "TS rejects" (HC-18). Formals may
+ * be dotted, for rest arguments, and quoted data is not code.
+ */
+export function improperCodeList(exprs: readonly Datum[]): Datum | null {
+  const formals = (f: Datum): Datum | null =>
+    f instanceof Dotted && !(f.items.every(isSym) && isSym(f.tail)) ? f : null;
+  const code = (e: Datum): Datum | null => {
+    if (e instanceof Dotted) return e;
+    if (!isList(e) || e.length === 0) return null;
+    const head = e[0];
+    if (head === QUOTE) return null;
+    if (head === LAMBDA && e.length >= 2) return formals(e[1]!) ?? body(e.slice(2));
+    if (head === CASE_LAMBDA) {
+      for (const clause of e.slice(1)) {
+        if (clause instanceof Dotted) return clause;
+        if (!isList(clause) || clause.length === 0) continue;
+        const found = formals(clause[0]!) ?? body(clause.slice(1));
+        if (found !== null) return found;
+      }
+      return null;
+    }
+    if (head === DEFINE && e.length >= 2) {
+      const target = e[1]!;
+      if (target instanceof Dotted) {
+        return isSym(target.items[0]!) ? formals(new Dotted(target.items.slice(1), target.tail)) ?? body(e.slice(2))
+          : target;
+      }
+      return body(e.slice(1));
+    }
+    return body(e);
+  };
+  const body = (es: readonly Datum[]): Datum | null => {
+    for (const x of es) {
+      const found = code(x);
+      if (found !== null) return found;
+    }
+    return null;
+  };
+  return body(exprs);
 }
 
 /**

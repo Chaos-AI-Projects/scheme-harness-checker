@@ -1,3 +1,6 @@
+import type { TerminationKind } from "./termination/violation.ts";
+
+// The front-end's own kinds, then termination's, reported under the names termination.ss uses.
 export type ViolationKind =
   | "unsupported-syntax"
   | "not-whitelisted"
@@ -6,7 +9,8 @@ export type ViolationKind =
   | "cast"
   | "ts-directive"
   | "computed-access"
-  | "type-error";
+  | "type-error"
+  | TerminationKind;
 
 export interface Violation {
   kind: ViolationKind;

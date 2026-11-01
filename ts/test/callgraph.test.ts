@@ -154,3 +154,11 @@ test("SCC: components come in Scheme's order, root first within each", () => {
   const g = graphOf("(define (a) (b)) (define (b) (c)) (define (c) (b))");
   assert.equal(write(tarjanScc(g)), "((a) (b c))");
 });
+
+test("a case-lambda clause with a dotted body keeps its proper prefix, as the Scheme's append does", () => {
+  // termination.ss appends the clause bodies, so ((x) (f x) . 0) still contributes (f x) and the
+  // self-call is seen. Dropping the body would accept the loop (HC-17).
+  const [def] = extractDefinitions(readAll("(define f (case-lambda ((x) (f x) . 0)))"));
+  assert.equal(write(def![1]), "((f x))");
+  assert.equal(edges("(define f (case-lambda ((x) (f x) . 0)))", "f"), "(f)");
+});

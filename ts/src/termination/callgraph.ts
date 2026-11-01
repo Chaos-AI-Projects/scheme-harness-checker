@@ -44,9 +44,10 @@ export function properPrefix(d: Datum): Datum[] {
   return [];
 }
 
-// The bodies of a case-lambda's clauses, concatenated.
+// The bodies of a case-lambda's clauses, concatenated. A dotted clause body keeps its proper prefix,
+// as the Scheme's append keeps it, so a self-call there stays on the graph (HC-17).
 function caseLambdaBodies(clauses: Datum): Datum[] {
-  return elements(clauses).flatMap((c) => (isPair(c) ? elements(cdr(c)) : []));
+  return elements(clauses).flatMap((c) => (isPair(c) ? properPrefix(cdr(c)) : []));
 }
 
 const isLambdaHead = (d: Datum): boolean => isPair(d) && (car(d) === LAMBDA || car(d) === CASE_LAMBDA);

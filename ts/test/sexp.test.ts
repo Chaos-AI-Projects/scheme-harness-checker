@@ -57,6 +57,12 @@ test("comments are skipped and every top-level form is read", () => {
   assert.deepEqual(forms, [[sym("a")], sym("b"), [sym("c"), sym("d")]]);
 });
 
+test("a symbol may carry an R6RS inline hex escape, as Chez writes -~1", () => {
+  assert.deepEqual(readOne("(\\x2D;~1 a)"), [sym("-~1"), sym("a")]);
+  assert.equal(readOne("a\\x41;b"), sym("aAb"));
+  assert.throws(() => readAll("\\x2D"));
+});
+
 test("write prints data the way Scheme's write does", () => {
   assert.equal(write(readOne("(x y #t)")), "(x y #t)");
   assert.equal(write(readOne("(a . b)")), "(a . b)");

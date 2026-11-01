@@ -192,7 +192,20 @@ class Reader {
     if (c === '"') return this.string();
     if (c === "#") return this.hash();
     const start = this.pos;
-    while (!this.isDelimiter(this.src[this.pos])) this.pos++;
+    let escaped = "";
+    let escapes = false;
+    while (!this.isDelimiter(this.src[this.pos])) {
+      // R6RS inline hex escape \xHH; inside a symbol. Chez writes -~1 as \x2D;~1.
+      if (this.src.startsWith("\\x", this.pos)) {
+        const end = this.src.indexOf(";", this.pos);
+        const hex = end < 0 ? "" : this.src.slice(this.pos + 2, end);
+        if (!/^[0-9a-f]+$/i.test(hex)) this.fail("bad inline hex escape");
+        escaped += String.fromCodePoint(parseInt(hex, 16));
+        escapes = true;
+        this.pos = end + 1;
+      } else escaped += this.src[this.pos++];
+    }
+    if (escapes) return sym(escaped);
     const text = this.src.slice(start, this.pos);
     if (text === ".") return DOT;
     if (NUMBER.test(text)) return Number(text);

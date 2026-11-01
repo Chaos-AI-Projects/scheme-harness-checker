@@ -38,6 +38,8 @@
           analyze-mutual-recursion
           ;; HC-2: higher-order call edges from 0CFA
           cfa-rewrite-program
+          cfa-analyze-program
+          alpha-rename-definitions
           ;; Collection HOF whitelist
           collection-hof?
           ;; HOF callback analysis

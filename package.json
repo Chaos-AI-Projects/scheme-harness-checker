@@ -8,7 +8,27 @@
   "engines": {
     "node": ">=24"
   },
+  "exports": {
+    ".": {
+      "types": "./ts/dist/index.d.ts",
+      "default": "./ts/dist/index.js"
+    },
+    "./ai-sdk": {
+      "types": "./ts/dist/ai-sdk.d.ts",
+      "default": "./ts/dist/ai-sdk.js"
+    }
+  },
+  "bin": {
+    "harness-checker-ts": "ts/dist/cli.js"
+  },
+  "files": [
+    "ts/dist",
+    "data/ts-safe.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
+    "prepare": "tsc -p ts/tsconfig.build.json",
     "test:ts": "node --test \"ts/test/**/*.test.ts\"",
     "typecheck:ts": "tsc -p ts"
   },

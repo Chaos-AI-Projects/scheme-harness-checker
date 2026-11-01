@@ -8,9 +8,12 @@
 // the executor work without the SDK.
 
 import { asSchema, jsonSchema, tool, type Tool, type ToolExecutionOptions } from "ai";
-import { checkTypeScript, type Violation } from "./check.ts";
+import { checkTypeScript } from "./check.ts";
+import { formatViolations } from "./format.ts";
 import { runProgram, type ToolFunction } from "./run.ts";
 import { toolDeclarations, type JsonSchema, type ToolSchema } from "./tool-decls.ts";
+
+export { formatViolations };
 
 export interface CheckedCodeToolOptions {
   /** The app's tools, which the program may call. Each needs an `execute`. */
@@ -97,11 +100,6 @@ export async function createCheckedCodeTool(options: CheckedCodeToolOptions) {
                     : { status: "error", error: run.error, logs: run.logs };
     },
   });
-}
-
-/** One `VIOLATION:` line per finding, the shape scheme-agent's models already repair against. */
-export function formatViolations(violations: Violation[]): string {
-  return violations.map((v) => `VIOLATION: line ${v.line}:${v.column} ${v.kind}: ${v.message}`).join("\n");
 }
 
 // A streaming execute yields preliminary outputs; the last one is the result.

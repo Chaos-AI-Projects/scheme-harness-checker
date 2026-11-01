@@ -1,0 +1,21 @@
+{
+  "name": "harness-checker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Static checker for LLM-generated Scheme and TypeScript tool-calling programs",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test:ts": "node --test \"ts/test/**/*.test.ts\"",
+    "typecheck:ts": "tsc -p ts"
+  },
+  "dependencies": {
+    "typescript": "6.0.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2"
+  }
+}

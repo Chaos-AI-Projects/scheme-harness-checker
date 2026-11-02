@@ -459,3 +459,14 @@ test("a compound assignment or increment statement lowers to set!", () => {
 test("unary plus lowers to a one-argument +", () => {
   assert.equal(lowered("const k = 2; const m = +k;"), "(define js.k 2) (define js.m (+ js.k))");
 });
+
+test("a call argument naming a pure const lowers as its expression only in a call that recurses back (HC-22)", () => {
+  assert.equal(
+    lowered("function f(n: number): number { const m = n - 1; return m > 0 ? f(m) : m; }"),
+    "(define (js.f js.n) (letrec* ((js.m (- js.n 1))) (if (> js.m 0) (js.f (- js.n 1)) js.m)))",
+  );
+  assert.equal(
+    lowered("function g(a: number): number { return a; } function h(n: number): number { const m = n - 1; return g(m); }"),
+    "(define (js.g js.a) js.a) (define (js.h js.n) (letrec* ((js.m (- js.n 1))) (js.g js.m)))",
+  );
+});

@@ -19,10 +19,13 @@
 // leaves the loop early, and lowering it as a value would lose the function's result.
 
 import ts from "typescript";
-import { sym, type Datum } from "./sexp.ts";
+import { Sym, sym, type Datum } from "./sexp.ts";
 import type { Violation } from "./violation.ts";
 
 const MAX_NODES = 20000;
+// How many consts deep a call argument is followed (HC-22). A longer chain keeps its name, which is
+// sound, rather than recursing until the stack runs out.
+const MAX_LINKS = 32;
 const LIB_PATH = "/ts-safe.d.ts";
 
 const S = {
@@ -70,6 +73,32 @@ const FLIPPED = new Map<ts.SyntaxKind, string>([
   [ts.SyntaxKind.LessThanToken, ">="], [ts.SyntaxKind.LessThanEqualsToken, ">"],
   [ts.SyntaxKind.GreaterThanToken, "<="], [ts.SyntaxKind.GreaterThanEqualsToken, "<"],
 ]);
+
+// The syntax a const initializer may use to be seen through (HC-22). Each is a
+// JavaScript operator with no effect that always returns. A record read is not one, since a record
+// field can be assigned. `length` can change after the binding, since an array can be pushed to, so
+// arcShape below never lets a length through to size-change.
+const PURE_OPERATORS = new Set([
+  ts.SyntaxKind.PlusToken, ts.SyntaxKind.MinusToken, ts.SyntaxKind.AsteriskToken, ts.SyntaxKind.SlashToken,
+  ts.SyntaxKind.PercentToken,
+]);
+const pureSyntax = (expression: ts.Expression): boolean => {
+  const e = skipParens(expression);
+  if (ts.isIdentifier(e) || ts.isNumericLiteral(e)) return true;
+  if (ts.isBinaryExpression(e)) return PURE_OPERATORS.has(e.operatorToken.kind) && pureSyntax(e.left) && pureSyntax(e.right);
+  if (ts.isPrefixUnaryExpression(e)) return e.operator === ts.SyntaxKind.MinusToken && pureSyntax(e.operand);
+  if (ts.isPropertyAccessExpression(e)) return e.name.text === "length" && pureSyntax(e.expression);
+  return false;
+};
+// The only argument shapes size-change reads: a name, or a name plus or minus a literal. Seeing through
+// nothing larger keeps an inlined argument at three forms, so a const used twice cannot double the
+// lowering. A constant gives size-change no arc, so a const bound to one keeps its name.
+const PLUS = sym("+");
+const MINUS = sym("-");
+const arcShape = (d: Datum): boolean =>
+  d instanceof Sym ||
+  (Array.isArray(d) && d.length === 3 && (d[0] === PLUS || d[0] === MINUS) &&
+    ((d[1] instanceof Sym && typeof d[2] === "number") || (d[0] === PLUS && typeof d[1] === "number" && d[2] instanceof Sym)));
 
 const skipParens = (e: ts.Expression): ts.Expression => (ts.isParenthesizedExpression(e) ? skipParens(e.expression) : e);
 
@@ -226,9 +255,9 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
 
   // A call whose arguments may spread becomes apply: the plain arguments before the first spread are
   // passed directly, and everything from it on is one list.
-  const call = (head: Datum, leading: Datum[], args: readonly ts.Expression[]): Datum => {
+  const call = (head: Datum, leading: Datum[], args: readonly ts.Expression[], throughConsts = false): Datum => {
     const k = args.findIndex(ts.isSpreadElement);
-    if (k < 0) return count([head, ...leading, ...args.map(expr)]);
+    if (k < 0) return count([head, ...leading, ...args.map(throughConsts ? argument : expr)]);
     const tail = appendArgs(args.slice(k));
     const list = tail.length === 1 && ts.isSpreadElement(args[k]) ? tail[0] : count([sym("append"), ...tail]);
     return count([sym("apply"), head, ...leading, ...args.slice(0, k).map(expr), list]);
@@ -253,6 +282,118 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     return undefined;
   };
 
+  // HC-22: a call argument naming a const bound to a pure expression lowers as that expression, so
+  // size-change sees `const m = n - 1; return f(m)` as f(n - 1). Only an argument, because that is
+  // all size-change reads. A const inside the expression is followed in turn.
+  //
+  // Pure means arithmetic and length alone: it has no effect and always returns, so evaluating it at
+  // the use instead of the binding changes nothing the analysis can see. Every name in it must be a
+  // parameter or a const that means the same thing at the use. useSite is the outermost use while a
+  // chain of consts is followed. Purity does not depend on the use, so it is decided once per const,
+  // and only an initializer whose syntax could be pure is lowered to find out.
+  let useSite: ts.Identifier | undefined;
+  let links = 0;
+  const pureConst = new Map<ts.VariableDeclaration, boolean>();
+  const seeThrough = (id: ts.Identifier): Datum | undefined => {
+    const site = useSite ?? id;
+    const d = constDeclaration(id);
+    if (!d || pureConst.get(d) === false || d.end > site.getStart()) return undefined;
+    if (!pureSyntax(d.initializer!)) {
+      pureConst.set(d, false);
+      return undefined;
+    }
+    if (!freeNamesStable(d.initializer!, site) || links >= MAX_LINKS) return undefined;
+    const saved = useSite;
+    useSite = site;
+    links++;
+    try {
+      const v = expr(d.initializer!);
+      const pure = arcShape(v);
+      pureConst.set(d, pure);
+      return pure ? v : undefined;
+    } finally {
+      useSite = saved;
+      links--;
+    }
+  };
+  const argument = (a: ts.Expression): Datum => {
+    const e = skipParens(a);
+    return (ts.isIdentifier(e) ? seeThrough(e) : undefined) ?? expr(a);
+  };
+  // Size-change reads only the arguments of a call that can come back to its caller, so a const is
+  // seen through there alone. Anywhere else inlining it only grows the lowering, which every
+  // fall-through if then copies (HC-22 review 3). A call counts when the callee is a function of this
+  // file whose body, followed through every function it names, names the caller's function again.
+  const userFunction = (id: ts.Identifier): ts.Node | undefined => {
+    const decls = checker.getSymbolAtLocation(id)?.declarations ?? [];
+    const d = decls.length === 1 ? decls[0]! : undefined;
+    if (!d || d.getSourceFile() !== sf) return undefined;
+    if (ts.isFunctionDeclaration(d) && d.body) return d;
+    if (ts.isVariableDeclaration(d) && d.initializer) {
+      const f = skipParens(d.initializer);
+      if (ts.isArrowFunction(f) || ts.isFunctionExpression(f)) return d;
+    }
+    return undefined;
+  };
+  const namedCaller = (n: ts.Node): ts.Node | undefined => {
+    for (let p = n.parent; p; p = p.parent) {
+      if (ts.isFunctionDeclaration(p) && p.name) return p;
+      if (ts.isVariableDeclaration(p) && p.initializer && ts.isIdentifier(p.name) && userFunction(p.name) === p) return p;
+    }
+    return undefined;
+  };
+  const named = new Map<ts.Node, Set<ts.Node>>();
+  const namedFunctions = (fn: ts.Node): Set<ts.Node> => {
+    let out = named.get(fn);
+    if (out) return out;
+    out = new Set();
+    const visit = (n: ts.Node): void => {
+      const f = ts.isIdentifier(n) ? userFunction(n) : undefined;
+      if (f) out!.add(f);
+      ts.forEachChild(n, visit);
+    };
+    ts.forEachChild(fn, visit);
+    named.set(fn, out);
+    return out;
+  };
+  const recursesBack = (callee: ts.Identifier): boolean => {
+    const target = userFunction(callee);
+    const caller = namedCaller(callee);
+    if (!target || !caller) return false;
+    const seen = new Set<ts.Node>([target]);
+    const work = [target];
+    while (work.length > 0) {
+      const f = work.pop()!;
+      if (f === caller) return true;
+      for (const g of namedFunctions(f)) if (!seen.has(g)) (seen.add(g), work.push(g));
+    }
+    return false;
+  };
+  const constDeclaration = (id: ts.Identifier): ts.VariableDeclaration | undefined => {
+    const decls = checker.getSymbolAtLocation(id)?.declarations ?? [];
+    if (decls.length !== 1) return undefined;
+    const d = decls[0]!;
+    if (!ts.isVariableDeclaration(d) || !ts.isIdentifier(d.name) || !d.initializer) return undefined;
+    return ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const ? d : undefined;
+  };
+  const freeNamesStable = (init: ts.Node, site: ts.Identifier): boolean => {
+    let ok = true;
+    const visit = (n: ts.Node): void => {
+      if (!ok) return;
+      if (ts.isPropertyAccessExpression(n)) return visit(n.expression);
+      if (ts.isIdentifier(n)) {
+        const s = checker.getSymbolAtLocation(n);
+        const d = s?.declarations?.length === 1 ? s.declarations[0]! : undefined;
+        const fixed = d !== undefined && (ts.isParameter(d) || constDeclaration(n) !== undefined);
+        ok = fixed && checker.resolveName(n.text, site, ts.SymbolFlags.Value, false) === s;
+        return;
+      }
+      ts.forEachChild(n, visit);
+    };
+    visit(init);
+    return ok;
+  };
+
   const expr = (e: ts.Expression): Datum => {
     if (ts.isParenthesizedExpression(e)) return expr(e.expression);
     if (ts.isAwaitExpression(e)) return expr(e.expression);
@@ -260,7 +401,7 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return count(e.text);
     if (e.kind === ts.SyntaxKind.TrueKeyword) return count(true);
     if (e.kind === ts.SyntaxKind.FalseKeyword) return count(false);
-    if (ts.isIdentifier(e)) return count(name(e));
+    if (ts.isIdentifier(e)) return (useSite ? seeThrough(e) : undefined) ?? count(name(e));
     if (ts.isAsExpression(e) && ts.isConstTypeReference(e.type)) return expr(e.expression);
     if (ts.isArrowFunction(e)) {
       const { formals, bindings } = params(e);
@@ -390,7 +531,7 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       }
     }
     if (ts.isCallExpression(e) && ts.isIdentifier(e.expression)) {
-      return call(name(e.expression), [], e.arguments);
+      return call(name(e.expression), [], e.arguments, recursesBack(e.expression));
     }
     throw new Unsupported(e, `${ts.SyntaxKind[e.kind]} is not lowered yet`);
   };

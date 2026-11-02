@@ -394,6 +394,146 @@ test("termination runs on the lowered program: a shrinking recursion is accepted
   `);
 });
 
+// HC-22: naming the smaller value before recursing is the common TypeScript shape.
+test("a const naming the decreasing argument is seen through", () => {
+  assertClean(`
+    function count(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      const m = n - 1;
+      return 1 + count(m);
+    }
+    function down(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      const k = n - 1;
+      const m = k;
+      return down(m);
+    }
+    console.log(count(3), down(2));
+  `);
+});
+
+test("only a pure const initializer is seen through", () => {
+  // A let can be reassigned before the call.
+  assertRejected(`
+    function g(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      let m = n - 1;
+      m = n;
+      return g(m);
+    }
+  `, "no-decreasing-arg");
+});
+
+test("a chain of impure consts is lowered once per const, not once per path (HC-22 review)", () => {
+  const chain = Array.from({ length: 12 }, (_, k) => `const c${k + 1} = h(c${k}, c${k});`).join("\n");
+  const started = Date.now();
+  checkTypeScript(`
+    const h = (a: number, b: number): number => a;
+    function f(n: number): number {
+      const c0 = n;
+      ${chain}
+      return h(c12, 0);
+    }
+  `, { toolDeclarations: TOOLS });
+  assert.ok(Date.now() - started < 5000, `took ${Date.now() - started}ms`);
+});
+
+test("a chain of pure consts used twice each is lowered once per const (HC-22 re-review)", () => {
+  // c22 is no shape size-change reads, so f(c22) keeps its name. Lowered afresh at every use instead,
+  // the chain doubles 22 times and the lowering grows past MAX_NODES.
+  const chain = Array.from({ length: 22 }, (_, k) => `const c${k + 1} = c${k} * c${k};`).join("\n");
+  assertRejected(`
+    function f(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      const c0 = n;
+      ${chain}
+      return f(c22);
+    }
+  `, "no-decreasing-arg");
+});
+
+test("a const is seen through only into a call that can recurse back (HC-22 review 3)", () => {
+  // Each fall-through if copies what follows it, so inlining m into every g(m) multiplies the
+  // lowering. g never calls f, so size-change reads nothing from these arguments.
+  const ifs = Array.from({ length: 8 }, (_, k) => `if (n === ${k}) { if (n > 100) return ${k}; }`).join("\n");
+  const uses = Array.from({ length: 15 }, () => "g(m)").join(" + ");
+  assertClean(`
+    function g(a: number): number { return a; }
+    function f(n: number): number {
+      const m = n - 1;
+      ${ifs}
+      return ${uses};
+    }
+    console.log(f(3));
+  `);
+});
+
+test("a chain of const aliases is followed only MAX_LINKS deep (HC-22)", () => {
+  // Followed all the way, f(c600) would read as f(n - 1) and pass. Capped, it keeps its name.
+  const chain = Array.from({ length: 600 }, (_, k) => `const c${k + 1} = c${k};`).join("\n");
+  assertRejected(`
+    function f(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      const c0 = n - 1;
+      ${chain}
+      return f(c600);
+    }
+  `, "no-decreasing-arg");
+});
+
+test("a const is seen through into a mutually recursive call (HC-22)", () => {
+  assertClean(`
+    function even(n: number): boolean {
+      if (!Number.isSafeInteger(n)) return false;
+      if (n <= 0) return true;
+      const m = n - 1;
+      return odd(m);
+    }
+    function odd(n: number): boolean {
+      if (!Number.isSafeInteger(n)) return false;
+      if (n <= 0) return false;
+      const m = n - 1;
+      return even(m);
+    }
+    console.log(even(4));
+  `);
+});
+
+test("a parameter assigned after the const still gives no arc", () => {
+  assertRejected(`
+    function f(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      const m = n - 1;
+      n = n + 5;
+      return f(m);
+    }
+  `, "no-decreasing-arg");
+});
+
+test("a const is not seen through where its names are shadowed", () => {
+  // Inside g, n is g's own parameter, so g(m) read as g(n - 1) would shrink it; m is h's n - 1, so
+  // h(2) runs g(1) forever (HC-22 review 5).
+  assertRejected(`
+    function h(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      const m = n - 1;
+      const g = (n: number): number => {
+        if (!Number.isSafeInteger(n)) return 0;
+        if (n <= 0) return 0;
+        return g(m);
+      };
+      return g(n + 5);
+    }
+  `, "no-decreasing-arg");
+});
+
 test("a construct the lowering does not know is unsupported syntax", () => {
   assertRejected(`const xs = [3, 1]; xs.unshift(0);`, "unsupported-syntax");
 });

@@ -470,3 +470,12 @@ test("a call argument naming a pure const lowers as its expression only in a cal
     "(define (js.g js.a) js.a) (define (js.h js.n) (letrec* ((js.m (- js.n 1))) (js.g js.m)))",
   );
 });
+
+// HC-26: 5,000 chained consts in a function body overflow the stack inside lowering itself.
+test("a program nested deeper than the lowering's stack is a violation, not a throw", () => {
+  const chain = Array.from({ length: 5000 }, (_, k) => `  const c${k + 1} = c${k};`).join("\n");
+  const code = `function f(n: number): number {\n  const c0 = n;\n${chain}\n  return c5000;\n}`;
+  const { ir, violations } = lowerTypeScript(code, { toolDeclarations: TOOLS });
+  assert.deepEqual(ir, []);
+  assert.deepEqual(violations.map((v) => v.kind), ["unsupported-syntax"]);
+});

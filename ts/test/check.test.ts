@@ -723,3 +723,14 @@ test("an element read is not a decrease, a string can pass as an array", () => {
     const o1 = { a: "str" }; const o2: {} = o1; const o3: { [k: string]: never[] } = o2; g(o3.a, 0);
   `, { toolDeclarations: TOOLS }).ok, false);
 });
+
+// HC-26: every const lowers to one more nested let*, and the checker's walkers recurse over that
+// nesting. 1,900 links overflowed in the termination pass and 5,000 in lowering; either is a
+// violation, never a thrown RangeError.
+test("a program nested deeper than the checker's stack is rejected, not thrown", () => {
+  for (const n of [1900, 5000]) {
+    const chain = Array.from({ length: n }, (_, k) => `const c${k + 1} = c${k};`).join("\n");
+    const code = `function f(n: number): number {\n  if (n <= 0) return 0;\n  const c0 = n - 1;\n${chain}\n  return f(c${n});\n}`;
+    assertRejected(code, "unsupported-syntax");
+  }
+});

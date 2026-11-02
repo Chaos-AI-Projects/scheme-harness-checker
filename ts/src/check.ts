@@ -57,11 +57,30 @@ const LIB_OBJECTS = new Set([...LIB_NAMES.values].filter((n) => !["NaN", "Infini
 const NOT_WHITELISTED = new Set([2304, 2552, 2339, 2550, 2551, 2576, 2582, 2583, 2584, 2585, 2591, 2693, 2867, 2868]);
 
 export function checkTypeScript(code: string, options: CheckOptions = {}): CheckResult {
-  const gated = gate(code, options);
-  if (gated.violations.length > 0) return result(gated.violations);
-  const lowered = lower(gated.program, gated.checker!, numericKeys(gated.program, gated.checker!));
-  if (lowered.violations.length > 0) return result(lowered.violations);
-  return result(checkTermination(lowered.ir, null, { numbers: "double" }).map((v) => fromTermination(v, gated.program)));
+  return withinStack(() => {
+    const gated = gate(code, options);
+    if (gated.violations.length > 0) return result(gated.violations);
+    const lowered = lower(gated.program, gated.checker!, numericKeys(gated.program, gated.checker!));
+    if (lowered.violations.length > 0) return result(lowered.violations);
+    return result(checkTermination(lowered.ir, null, { numbers: "double" }).map((v) => fromTermination(v, gated.program)));
+  }, result);
+}
+
+// Each const lowers to one more nested let*, and the gate, the lowering and the termination walkers
+// all recurse over that nesting (HC-26). A program nested past the stack is the program's fault, so
+// it is rejected as a violation; any other throw still escapes.
+function withinStack<T>(check: () => T, rejected: (violations: Violation[]) => T): T {
+  try {
+    return check();
+  } catch (e) {
+    if (!(e instanceof RangeError && /call stack/i.test(e.message))) throw e;
+    return rejected([{
+      kind: "unsupported-syntax",
+      message: "the program nests too deeply for the checker; split long statement chains into functions",
+      line: 1,
+      column: 1,
+    }]);
+  }
 }
 
 // Lowering prefixes every user name with `js.`, which no TypeScript identifier contains, so the
@@ -93,9 +112,11 @@ function declarationOf(sf: ts.SourceFile, name: string): ts.Node | undefined {
 
 /** The IR of a program that passes every gate, else the gates' violations and no IR (HC-18). */
 export function lowerTypeScript(code: string, options: CheckOptions = {}): Lowered {
-  const gated = gate(code, options);
-  if (gated.violations.length > 0) return { ir: [], violations: gated.violations };
-  return lower(gated.program, gated.checker!, numericKeys(gated.program, gated.checker!));
+  return withinStack(() => {
+    const gated = gate(code, options);
+    if (gated.violations.length > 0) return { ir: [], violations: gated.violations };
+    return lower(gated.program, gated.checker!, numericKeys(gated.program, gated.checker!));
+  }, (violations) => ({ ir: [], violations }));
 }
 
 function gate(code: string, options: CheckOptions): { program: ts.SourceFile; violations: Violation[]; checker?: ts.TypeChecker } {

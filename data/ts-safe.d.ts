@@ -43,6 +43,7 @@ interface NumberConstructor {
   readonly MAX_SAFE_INTEGER: number;
   readonly MIN_SAFE_INTEGER: number;
   isInteger(value: unknown): boolean;
+  isSafeInteger(value: unknown): boolean;
   isFinite(value: unknown): boolean;
   isNaN(value: unknown): boolean;
   parseFloat(text: string): number;

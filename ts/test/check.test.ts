@@ -386,6 +386,7 @@ test("termination runs on the lowered program: a recursion that never shrinks is
 test("termination runs on the lowered program: a shrinking recursion is accepted", () => {
   assertClean(`
     function count(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
       if (n <= 0) return 0;
       return 1 + count(n - 1);
     }
@@ -460,8 +461,9 @@ test("+ is numeric progress only when both operands are numbers by construction"
   assert.equal(checkTypeScript(`
     function up(i: number): number { if (i >= 10) return 0; return up(i + 1); }
   `, { toolDeclarations: TOOLS }).ok, false);
-  // ++ always converts to a number, and a counter only ever assigned numbers may step by +=.
-  assert.equal(checkTypeScript(poisoned(`for (let i = x; i < 10; i++) { k = k + 1; }`), { toolDeclarations: TOOLS }).ok, true);
+  // ++ always converts to a number, but since HC-21 a start of x, assigned by a closure, is not a
+  // proven safe integer either, so the ++ loop is rejected too.
+  assert.equal(checkTypeScript(poisoned(`for (let i = x; i < 10; i++) { k = k + 1; }`), { toolDeclarations: TOOLS }).ok, false);
   assert.equal(checkTypeScript(`let k = 0; for (let i = 0; i < 10; i += 2) { k = k + 1; }`, { toolDeclarations: TOOLS }).ok, true);
 });
 

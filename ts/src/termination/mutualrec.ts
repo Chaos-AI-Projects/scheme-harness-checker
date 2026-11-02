@@ -5,7 +5,7 @@
 import { car, caddr, cadr, cddr, cdddr, cdr, Dotted, isPair, isSym, sym, type Datum, type Sym } from "../sexp.ts";
 import { buildCallGraph, callGraphEdges, extractDefinitions, properPrefix, tarjanScc, type CallGraph } from "./callgraph.ts";
 import { findDefinitionForm, findFormalsFor } from "./directrec.ts";
-import { equalityStopHint, exprReferencesAny } from "./guards.ts";
+import { equalityStopHint, exprReferencesAny, formalNames, numericallyStepped, safeIntegerHint } from "./guards.ts";
 import { baseCaseTest, condFallThroughTest, negatedBaseCaseTest } from "./namedlet.ts";
 import { sccSizeChange } from "./sizechange.ts";
 import type { TerminationKind, TerminationViolation } from "./violation.ts";
@@ -153,7 +153,8 @@ export function analyzeMutualRecursion(exprs: readonly Datum[]): TerminationViol
         add(
           "no-decreasing-arg",
           n,
-          (form) => `mutual recursion group ${group} has no decreasing argument across call edges${equalityStopHint(form ?? false)}`,
+          (form) => `mutual recursion group ${group} has no decreasing argument across call edges${
+            equalityStopHint(form ?? false) || safeIntegerHint(numericallyStepped([form ?? false], formalsIn(form ?? false)))}`,
         );
       }
     } else if (!sccHasBaseCase(exprs, scc, graph)) {
@@ -161,4 +162,9 @@ export function analyzeMutualRecursion(exprs: readonly Datum[]): TerminationViol
     }
   }
   return violations;
+}
+
+// The formals of a (define (f x ...) ...) form, for safeIntegerHint.
+function formalsIn(form: Datum): Datum[] {
+  return Array.isArray(form) && form.length > 1 && Array.isArray(form[1]) ? formalNames(form[1].slice(1)) : [];
 }

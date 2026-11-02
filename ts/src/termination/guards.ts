@@ -67,7 +67,9 @@ function nth(expr: Datum, i: number): Datum | undefined {
   return properPrefix(expr)[i];
 }
 
-const isPositiveNumber = (d: Datum | undefined): boolean => typeof d === "number" && d > 0;
+// Under JavaScript doubles a step must be a positive integer literal: 1e-30 stalls below one ulp.
+const isPositiveNumber = (d: Datum | undefined): boolean =>
+  typeof d === "number" && d > 0 && (doubles === null || Number.isSafeInteger(d));
 
 // A proper list of exactly n elements headed by head.
 const isForm = (expr: Datum, head: Sym, n: number): expr is Datum[] =>
@@ -463,4 +465,276 @@ export function ascentGuarded(x: Datum, guards: readonly Guard[], boundOk: Bound
     const [v, bound] = upperBoundTestPair(t, [x]);
     return v === x && boundOk(bound);
   });
+}
+
+// ---------------------------------------------------------------
+// JavaScript doubles (HC-21)
+// ---------------------------------------------------------------
+//
+// A numeric measure proves termination only on values that are safe integers. A double at 2^53 has
+// i + 1 === i, and NaN and the infinities never reach a bound. checkTypeScript() turns this mode on
+// with withDoubles(); Scheme's exact integers do not need it, so the port matches Chez with it off.
+// See plans/hc-21-js-doubles-termination.md in the brain vault.
+
+const SAFE_INTEGER_P = sym("js.Number.isSafeInteger");
+const SMALL_LITERAL = 2 ** 32;
+const LENGTH_OPS: ReadonlySet<Datum> = new Set(["length", "string-length", "vector-length"].map(sym));
+const DO_FORM = sym("do");
+const SET = sym("set!");
+const GUARD = sym("guard");
+
+// Where a name is bound. A name may have several sites: the lowering of a while loop binds its do
+// variable under the name of the variable it writes back to.
+type Site =
+  | { readonly kind: "init"; readonly init: Datum; readonly anchor: Datum }
+  | { readonly kind: "do"; readonly doExpr: Datum }
+  | { readonly kind: "opaque" };
+
+interface Doubles {
+  readonly exprs: readonly Datum[];
+  readonly sites: Map<Datum, Site[]>;
+  // Each name a set! assigns, with the values it assigns.
+  readonly assigned: Map<Datum, Datum[]>;
+  // provenSafe's verdict on a name, kept only when it rests on no assumption about another name.
+  readonly memo: Map<Datum, boolean>;
+  // The same for an unguarded name, which also proves every binding site.
+  readonly unguardedMemo: Map<Datum, boolean>;
+  readonly guardsAtAnchor: Map<Datum, Guard[]>;
+}
+
+// The names whose seen or assumed status a provenSafe call relied on, so its verdict is not cached.
+let leaned = new Set<Datum>();
+
+let doubles: Doubles | null = null;
+
+/** Whether the double mode of withDoubles is on. */
+export function doublesMode(): boolean {
+  return doubles !== null;
+}
+
+const VALUE_BINDERS = new Set(["let", "let*", "letrec", "letrec*"].map(sym));
+
+/** Runs body with numeric measures judged as JavaScript doubles over the program exprs. */
+export function withDoubles<T>(exprs: readonly Datum[], body: () => T): T {
+  const sites = new Map<Datum, Site[]>();
+  const assigned = new Map<Datum, Datum[]>();
+  const site = (name: Datum, s: Site): void => {
+    sites.set(name, [...(sites.get(name) ?? []), s]);
+  };
+  const opaque = (names: readonly Datum[]): void => names.forEach((n) => site(n, { kind: "opaque" }));
+  const walk = (e: Datum): void => {
+    if (!isCodeList(e)) return;
+    const head = e[0]!;
+    if (head === S.define && e.length >= 2) {
+      if (isSym(e[1]!)) site(e[1]!, e.length === 3 ? { kind: "init", init: e[2]!, anchor: e } : { kind: "opaque" });
+      else opaque(formalNames(e[1]!));
+    } else if (head === S.lambda && e.length >= 2) {
+      opaque(formalNames(e[1]!));
+    } else if (head === S.caseLambda) {
+      for (const c of e.slice(1)) if (isPair(c)) opaque(formalNames(car(c)));
+    } else if (head === S.let && e.length >= 3 && isSym(e[1]!)) {
+      // A named let rebinds its variables on every pass.
+      opaque([e[1]!, ...bindingNames(e[2]!)]);
+    } else if (isSym(head) && VALUE_BINDERS.has(head) && e.length >= 2 && isList(e[1]!)) {
+      for (const b of e[1] as Datum[]) {
+        if (isList(b) && b.length === 2 && isSym(b[0]!)) site(b[0]!, { kind: "init", init: b[1]!, anchor: b });
+        else if (isPair(b)) opaque(formalNames(car(b)));
+      }
+    } else if (head === DO_FORM && e.length >= 2 && isList(e[1]!)) {
+      for (const b of e[1] as Datum[]) if (isPair(b)) site(car(b), isSym(car(b)) ? { kind: "do", doExpr: e } : { kind: "opaque" });
+    } else if (isSym(head) && LIST_BINDERS.has(head) && e.length >= 2) {
+      opaque(bindingNames(e[1]!));
+    } else if (head === GUARD && e.length >= 2 && isPair(e[1]!)) {
+      opaque(formalNames(car(e[1]!)));
+    }
+    if (head === SET && e.length === 3) assigned.set(e[1]!, [...(assigned.get(e[1]!) ?? []), e[2]!]);
+    e.forEach(walk);
+  };
+  exprs.forEach(walk);
+  const saved = doubles;
+  doubles = { exprs, sites, assigned, memo: new Map(), unguardedMemo: new Map(), guardsAtAnchor: new Map() };
+  try {
+    return body();
+  } finally {
+    doubles = saved;
+  }
+}
+
+// An integer literal of at most 2^32 or a length, or a sum or difference of such terms. A program
+// holds far fewer than 2^21 of them, so the result stays a safe integer.
+function smallSafe(t: Datum): boolean {
+  if (typeof t === "number") return Number.isInteger(t) && Math.abs(t) <= SMALL_LITERAL;
+  if (!isCodeOrQuotedList(t)) return false;
+  if (LENGTH_OPS.has(t[0]!)) return t.length === 2;
+  return (t[0] === S.plus || t[0] === S.minus) && t.length === 3 && smallSafe(t[1]!) && smallSafe(t[2]!);
+}
+
+// A guard that holds Number.isSafeInteger(x): the call known true or its negation known false.
+function safeGuarded(x: Datum, guards: readonly Guard[]): boolean {
+  const isCheck = (t: Datum): boolean => isCodeOrQuotedList(t) && t.length === 2 && t[0] === SAFE_INTEGER_P && t[1] === x;
+  return guards.some(([t, known]) =>
+    known ? isCheck(t) : isCodeOrQuotedList(t) && t[0] === S.not && t.length === 2 && isCheck(t[1]!));
+}
+
+/**
+ * termination term is proven a safe integer where guards hold: a safe integer literal, a smallSafe
+ * term, a name under a Number.isSafeInteger guard, a name bound once to a proven term and never
+ * assigned, or the variable of a do-loop that counts by an integer step between proven ends.
+ * Outside withDoubles every term counts as proven.
+ */
+export function provenSafe(
+  term: Datum,
+  guards: readonly Guard[],
+  seen: readonly Datum[] = [],
+  assumed: readonly Datum[] = [],
+): boolean {
+  if (doubles === null) return true;
+  if (typeof term === "number") return Number.isSafeInteger(term);
+  if (smallSafe(term)) return true;
+  if (!isSym(term)) return false;
+  if (assumed.includes(term) || seen.includes(term)) {
+    leaned.add(term);
+    return assumed.includes(term);
+  }
+  // An assigned name is proven by induction over the run: its value at the guard or its binding
+  // is, and each set! writes back a value a do-loop computed from a proven one.
+  const next = [...seen, term];
+  const writesSafe = (): boolean =>
+    (doubles!.assigned.get(term) ?? []).every((v) => doExitSafe(v, next, [...assumed, term]));
+  if (safeGuarded(term, guards)) return cached(doubles.memo, term, writesSafe);
+  // The sites carry their own anchor guards, so the unguarded verdict ignores guards and is cached.
+  return cached(doubles.unguardedMemo, term, () => sitesSafe(term, next, assumed, writesSafe));
+}
+
+// Every binding site of an unguarded term is proven, and so is every value set! writes to it.
+function sitesSafe(
+  term: Datum,
+  next: readonly Datum[],
+  assumed: readonly Datum[],
+  writesSafe: () => boolean,
+): boolean {
+  const sites = doubles!.sites.get(term) ?? [];
+  if (sites.length === 0) return false;
+  // Whichever site a use denotes, its value is proven.
+  const siteSafe = (st: Site): boolean => {
+    if (st.kind === "init") return provenSafe(st.init, anchorGuards(st.anchor), next, assumed);
+    // A do variable's start is read before its loop runs, so it may assume the name's earlier values.
+    if (st.kind === "do") return doVarSafe(st.doExpr, term, next, [...assumed, term]);
+    return false;
+  };
+  return sites.every(siteSafe) && cached(doubles!.memo, term, writesSafe);
+}
+
+// body's verdict on name, from memo when an earlier verdict rested on no other name's status.
+function cached(memo: Map<Datum, boolean>, name: Datum, body: () => boolean): boolean {
+  if (memo.has(name)) return memo.get(name)!;
+  const outer = leaned;
+  leaned = new Set();
+  const verdict = body();
+  const mine = leaned;
+  leaned = outer;
+  mine.delete(name);
+  if (mine.size === 0) memo.set(name, verdict);
+  else mine.forEach((n) => outer.add(n));
+  return verdict;
+}
+
+// guardsAt over the whole program, once per anchor.
+function anchorGuards(anchor: Datum): Guard[] {
+  const cache = doubles!.guardsAtAnchor;
+  if (!cache.has(anchor)) cache.set(anchor, guardsAt(doubles!.exprs, anchor) ?? []);
+  return cache.get(anchor)!;
+}
+
+/**
+ * The guards that hold inside a do-form's exit test and steps: those around it, less any that
+ * mention a name the do-form rebinds.
+ */
+export function doInnerGuards(doExpr: Datum, outer: readonly Guard[]): Guard[] {
+  const vars = isCodeOrQuotedList(doExpr) && isList(doExpr[1]!) ? bindingNames(doExpr[1]!) : [];
+  return outer.filter(([t]) => !exprReferencesAny(t, vars));
+}
+
+/** The guards around a do-form, before its own variables are bound. */
+export function doOuterGuards(doExpr: Datum): Guard[] {
+  return doubles === null ? [] : anchorGuards(doExpr);
+}
+
+// A do-form whose value is a loop variable that leaves the loop a safe integer: it counts by a step
+// of at most 2^32 from a proven start toward a smallSafe bound, so it stops within one step of it.
+// This is the write-back the lowering of a while loop makes.
+function doExitSafe(v: Datum, seen: readonly Datum[], assumed: readonly Datum[]): boolean {
+  if (!isCodeOrQuotedList(v) || v[0] !== DO_FORM || !isList(v[1]!) || !isList(v[2]!)) return false;
+  const exit = v[2] as Datum[];
+  const y = exit.length === 2 ? exit[1]! : null;
+  if (y === null || !isSym(y)) return false;
+  const binding = (v[1] as Datum[]).find((b) => isList(b) && b[0] === y) as Datum[] | undefined;
+  const step = binding?.[2];
+  const k = step !== undefined && isCodeOrQuotedList(step) ? step[step[1] === y ? 2 : 1] : undefined;
+  const smallStep = typeof k === "number" && k <= SMALL_LITERAL;
+  return smallStep && doVarSafe(v, y, seen, assumed, smallSafe);
+}
+
+// A do variable x is a safe integer inside its loop when its start and its bound are, its step
+// moves it by a positive integer toward the bound, and nothing in the loop assigns it.
+function doVarSafe(
+  doExpr: Datum,
+  x: Datum,
+  seen: readonly Datum[],
+  assumed: readonly Datum[],
+  boundRule: (b: Datum) => boolean = () => true,
+): boolean {
+  if (!isCodeOrQuotedList(doExpr) || !isList(doExpr[1]!) || !isList(doExpr[2]!)) return false;
+  const binding = (doExpr[1] as Datum[]).find((b) => isList(b) && b[0] === x);
+  if (!isList(binding!) || binding.length !== 3) return false;
+  const [, init, step] = binding as [Datum, Datum, Datum];
+  if (assignsName(doExpr.slice(2), x)) return false;
+  const outer = anchorGuards(doExpr);
+  const inner = doInnerGuards(doExpr, outer);
+  const tests = doContinueTests((doExpr[2] as Datum[])[0]!);
+  const ok = (b: Datum): boolean => provenSafe(b, outer, seen, assumed);
+  const bound = (b: Datum): boolean => provenSafe(b, inner, seen, assumed) && boundRule(b);
+  const down = numericStep(step) && decreasingExpr(step, x) && tests.some((t) => lowerStopTest(t, x, bound));
+  const up = increasingExpr(step, x) && tests.some((t) => isCodeOrQuotedList(t) && upperBoundBaseCaseTest(t, [x]) &&
+    bound(upperBoundTestPair(t, [x])[1]));
+  return (down || up) && ok(init);
+}
+
+// Whether some set! in es assigns name.
+function assignsName(es: readonly Datum[], name: Datum): boolean {
+  return es.some((e) => isCodeList(e) && ((e[0] === SET && e[1] === name) || assignsName(e, name)));
+}
+
+// The disjuncts of a do-loop's exit test, any one of which ends the loop.
+function doContinueTests(test: Datum): Datum[] {
+  return isCodeOrQuotedList(test) && test[0] === sym("or") ? test.slice(1).flatMap(doContinueTests) : [test];
+}
+
+/** The names in term that provenSafe does not prove, for a hint that names the guard to add. */
+export function unprovenNames(term: Datum, guards: readonly Guard[]): Sym[] {
+  if (isSym(term)) return provenSafe(term, guards) ? [] : [term];
+  if (!isCodeOrQuotedList(term) || term[0] === S.quote) return [];
+  return term.slice(1).flatMap((t) => unprovenNames(t, guards));
+}
+
+/** The formals a numeric step moves anywhere in body, for safeIntegerHint. */
+export function numericallyStepped(body: readonly Datum[], formals: readonly Datum[]): Sym[] {
+  const found: Sym[] = [];
+  const walk = (e: Datum): void => {
+    if (!isCodeList(e)) return;
+    if (numericStep(e)) for (const x of formals) if (isSym(x) && monotonicExpr(e, x)) found.push(x);
+    e.forEach(walk);
+  };
+  body.forEach(walk);
+  return found;
+}
+
+/** The note for a numeric measure rejected for want of a safe-integer proof. */
+export function safeIntegerHint(names: readonly Sym[]): string {
+  const unique = [...new Set(names.filter((s) => doubles?.sites.has(s)))];
+  if (doubles === null || unique.length === 0) return "";
+  const written = unique.map((s) => s.name.replace(/~\d+$/, ""));
+  const n = written[0]!;
+  return `; ${written.join(", ")} is not proven a safe integer, and NaN, Infinity or a value ` +
+    `above 2^53 never reaches the bound: add if (!Number.isSafeInteger(${n})) return; before counting on it`;
 }

@@ -4,7 +4,7 @@
 
 import { caadr, car, cadr, caddr, cdadr, cddr, cdr, isList, isPair, isSym, sym, type Datum, type Sym } from "../sexp.ts";
 import { buildCallGraph, callGraphEdges, extractDefinitions, properPrefix, tarjanScc } from "./callgraph.ts";
-import { equalityStopHint } from "./guards.ts";
+import { equalityStopHint, numericallyStepped, safeIntegerHint } from "./guards.ts";
 import { hasBaseCase } from "./namedlet.ts";
 import { sccSizeChange } from "./sizechange.ts";
 import type { TerminationKind, TerminationViolation } from "./violation.ts";
@@ -130,7 +130,8 @@ export function analyzeDirectRecursion(exprs: readonly Datum[]): TerminationViol
     if (progress === "limit") {
       add("size-change-limit", name, form, `${label} exceeds the size-change analysis limit`);
     } else if (progress === "no-descent" || (progress === "unguarded" && hasBaseCase(body, name, formals ?? []))) {
-      add("no-decreasing-arg", name, form, `${label} has no decreasing argument in recursive call(s)${equalityStopHint(body)}`);
+      add("no-decreasing-arg", name, form, `${label} has no decreasing argument in recursive call(s)${
+        equalityStopHint(body) || safeIntegerHint(numericallyStepped(body, formals ?? []))}`);
     } else if (!hasBaseCase(body, name, formals ?? [])) {
       add("no-base-case", name, form, `${label} has no reachable base case`);
     }

@@ -61,7 +61,7 @@ export function checkTypeScript(code: string, options: CheckOptions = {}): Check
   if (gated.violations.length > 0) return result(gated.violations);
   const lowered = lower(gated.program, gated.checker!, numericKeys(gated.program, gated.checker!));
   if (lowered.violations.length > 0) return result(lowered.violations);
-  return result(checkTermination(lowered.ir).map((v) => fromTermination(v, gated.program)));
+  return result(checkTermination(lowered.ir, null, { numbers: "double" }).map((v) => fromTermination(v, gated.program)));
 }
 
 // Lowering prefixes every user name with `js.`, which no TypeScript identifier contains, so the

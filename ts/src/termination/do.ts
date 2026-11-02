@@ -8,10 +8,15 @@ import {
   ascentGuarded,
   decreasingExpr,
   descentGuarded,
+  doInnerGuards,
+  doOuterGuards,
   equalityStopHint,
   exprReferencesAny,
   increasingExpr,
   numericStep,
+  provenSafe,
+  safeIntegerHint,
+  unprovenNames,
   type Guard,
 } from "./guards.ts";
 import { makeBoundOk, setTargets } from "./sizechange.ts";
@@ -48,20 +53,26 @@ export function doContinueGuards(test: Datum): Guard[] {
  * bound must be stable: pure bound ops over literals, unstepped loop variables and names that no
  * set! in the program assigns (assigned).
  */
-export function doStepsProgress(doExpr: Datum, assigned: readonly Datum[]): boolean {
+export function doStepsProgress(doExpr: Datum, assigned: readonly Datum[], outer: readonly Guard[] = []): boolean {
   const bindings = elements(cadr(doExpr)).filter((b) => isPair(b) && isSym(car(b)));
   const vars = bindings.map((b) => car(b));
   const steps = bindings.map((b) => (isPair(cdr(b)) && isPair(cddr(b)) ? caddr(b) : car(b)));
+  const inits = bindings.map((b) => (isPair(cdr(b)) ? cadr(b) : false));
   const test = car(caddr(doExpr));
   const guards = doContinueGuards(test);
-  const boundOk = makeBoundOk(vars, [[DO, ...steps]], assigned, []);
+  const stable = makeBoundOk(vars, [[DO, ...steps]], assigned, []);
+  // Under JavaScript doubles a numeric start and bound must also be proven safe integers (HC-21).
+  // The bound is read inside the loop, where the do-form's own variables shadow outer guards.
+  const inner = doInnerGuards(doExpr, outer);
+  const boundOk = (b: Datum): boolean => stable(b) && provenSafe(b, inner);
   const reset = setTargets(doExpr);
   return vars.some((x, i) => {
     const s = steps[i]!;
     if (reset.includes(x)) return false;
+    const startOk = provenSafe(inits[i]!, outer);
     return (
-      (numericStep(s) && decreasingExpr(s, x) && descentGuarded(x, guards, boundOk)) ||
-      (increasingExpr(s, x) && ascentGuarded(x, guards, boundOk)) ||
+      (numericStep(s) && decreasingExpr(s, x) && startOk && descentGuarded(x, guards, boundOk)) ||
+      (increasingExpr(s, x) && startOk && ascentGuarded(x, guards, boundOk)) ||
       (!numericStep(s) && decreasingExpr(s, x) && exprReferencesAny(test, [x]))
     );
   });
@@ -89,8 +100,9 @@ export function analyzeDoForms(exprs: readonly Datum[]): TerminationViolation[] 
       add(doExpr, "do-form has no step expressions; loop variables never change");
     } else if (isPair(termination) && vars.length > 0 && hasAnyStep && !exprReferencesAny(car(termination), vars)) {
       add(doExpr, "do-form exit test does not reference any loop variable");
-    } else if (isPair(termination) && isList(bindings) && !doStepsProgress(doExpr, assigned)) {
-      add(doExpr, "do-form has no step that moves a tested variable toward the exit test" + equalityStopHint(doExpr));
+    } else if (isPair(termination) && isList(bindings) && !doStepsProgress(doExpr, assigned, doOuterGuards(doExpr))) {
+      const hint = equalityStopHint(doExpr) || safeIntegerHint(unsafeEnds(doExpr, doOuterGuards(doExpr)));
+      add(doExpr, "do-form has no step that moves a tested variable toward the exit test" + hint);
     }
   };
 
@@ -102,4 +114,15 @@ export function analyzeDoForms(exprs: readonly Datum[]): TerminationViolation[] 
 
   for (const e of exprs) walk(e);
   return violations;
+}
+
+// The names in a do-loop's starts and exit test that are not proven safe integers.
+function unsafeEnds(doExpr: Datum, outer: readonly Guard[]): Sym[] {
+  const bindings = elements(cadr(doExpr)).filter((b) => isPair(b) && isSym(car(b)));
+  const vars = bindings.map((b) => car(b));
+  const starts = bindings.map((b) => (isPair(cdr(b)) ? cadr(b) : false));
+  return [
+    ...starts.flatMap((e) => unprovenNames(e, outer)),
+    ...unprovenNames(car(caddr(doExpr)), doInnerGuards(doExpr, outer)).filter((n) => !vars.includes(n)),
+  ];
 }

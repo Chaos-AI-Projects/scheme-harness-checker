@@ -11,7 +11,7 @@ import { buildCallGraph, callGraphEdges, extractDefinitions, tarjanScc } from ".
 import { cfaAnalyzeProgram } from "./cfaprogram.ts";
 import { analyzeDirectRecursion } from "./directrec.ts";
 import { analyzeDoForms } from "./do.ts";
-import { flattenBegins } from "./guards.ts";
+import { flattenBegins, withDoubles } from "./guards.ts";
 import { checkHofCallbacks, detectUserDefinedHofs } from "./hof.ts";
 import { analyzeMutualRecursion } from "./mutualrec.ts";
 import { analyzeNamedLetForms } from "./namedlet.ts";
@@ -23,10 +23,22 @@ const CASE_LAMBDA = sym("case-lambda");
 const QUOTE = sym("quote");
 
 /**
+ * numbers "double" judges numeric measures as JavaScript doubles: a loop or recursion counts only
+ * over proven safe integers (HC-21). "exact", the default, is Scheme's and matches Chez.
+ */
+export interface TerminationOptions {
+  readonly numbers?: "exact" | "double";
+}
+
+/**
  * termination.ss:3259 check-termination. maxDefinitions, when set, blocks a program with more
  * definitions than that; null means no limit.
  */
-export function checkTermination(exprs: readonly Datum[], maxDefinitions: number | null = null): TerminationViolation[] {
+export function checkTermination(
+  exprs: readonly Datum[],
+  maxDefinitions: number | null = null,
+  options: TerminationOptions = {},
+): TerminationViolation[] {
   if (cyclicDatum(exprs as Datum[])) {
     return [
       {
@@ -51,7 +63,10 @@ export function checkTermination(exprs: readonly Datum[], maxDefinitions: number
   const { exprs: renamed, topEnv } = alphaRenameDefinitions(exprs);
   return [
     ...duplicateTopLevelDefinitions(exprs),
-    ...checkTerminationRenamed(renamed, maxDefinitions).map((v) => restoreTopLevelNames(v, topEnv)),
+    ...(options.numbers === "double"
+      ? withDoubles(renamed, () => checkTerminationRenamed(renamed, maxDefinitions))
+      : checkTerminationRenamed(renamed, maxDefinitions)
+    ).map((v) => restoreTopLevelNames(v, topEnv)),
   ];
 }
 

@@ -35,6 +35,7 @@ import {
   increasingExpr,
   namesBoundAround,
   numericStep,
+  provenSafe,
   upperBoundBaseCases,
   type BoundOk,
   type BoundPair,
@@ -119,8 +120,11 @@ export function callScGraph(
   guards: CallGuards,
   boundOk: BoundOk,
 ): ScGraph {
+  // Under JavaScript doubles the formal and the guard's bound must be proven safe integers at the
+  // call (HC-21); provenSafe is always true otherwise.
   const guarded = (ok: (x: Datum, gs: readonly Guard[], b: BoundOk) => boolean, x: Datum): boolean =>
-    guards === "any" || ok(x, guards, boundOk);
+    guards === "any" ||
+    (provenSafe(x, guards) && ok(x, guards, (b) => boundOk(b) && provenSafe(b, guards)));
   // The Scheme conses each argument's arcs onto the front; makeScGraph sorts them anyway.
   let acc: Arc[] = [];
   const args = call.slice(1);

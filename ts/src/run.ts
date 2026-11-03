@@ -1,4 +1,4 @@
-// The executor for checked programs: QuickJS compiled to WebAssembly, one fresh runtime per run,
+// The executor for checked programs: QuickJS compiled to WebAssembly, one fresh instance per run,
 // holding the standard builtins plus only the globals injected here. Node's own `vm` module is not
 // a security boundary, so it is not used. The checker is the gate; this realm is the layer a bypass
 // of the gate still meets.
@@ -9,6 +9,8 @@
 
 import {
   newQuickJSWASMModule,
+  newVariant,
+  RELEASE_SYNC,
   shouldInterruptAfterDeadline,
   type QuickJSDeferredPromise,
   type QuickJSHandle,
@@ -24,7 +26,7 @@ export interface RunOptions {
   tools?: Record<string, ToolFunction>;
   /** Wall-clock budget for the whole run, tool calls included. Default 5000. */
   timeoutMs?: number;
-  /** Heap limit for the QuickJS runtime. Default 64 MiB. */
+  /** Heap limit for the program. Default 64 MiB. */
   memoryLimitBytes?: number;
 }
 
@@ -46,10 +48,48 @@ const MAX_TOOL_CALLS_IN_FLIGHT = 64;
 // this many characters of them across the whole run.
 const MAX_TOOL_ARG_CHARS = 8 * 1024 * 1024;
 
-// A module of our own rather than getQuickJS()'s shared one, so that if disposal ever aborts the
-// WebAssembly instance, only this module is dropped and the next run loads a fresh one.
-let quickjsModule: Promise<QuickJSWASMModule> | undefined;
-const loadQuickJS = () => (quickjsModule ??= newQuickJSWASMModule());
+// WebAssembly memory comes in 64 KiB pages, and the module starts with 16 MiB of its own.
+const WASM_PAGE_BYTES = 64 * 1024;
+const MODULE_INITIAL_BYTES = 16 * 1024 * 1024;
+const OUT_OF_MEMORY = "the program ran out of memory";
+
+// Each run gets its own WebAssembly instance, whose memory cannot grow past the run's limit. QuickJS
+// cannot enforce that limit itself: this build lacks malloc_usable_size, so it counts allocations
+// rather than their bytes, and a program of large arrays grew the shared heap to 2 GiB (HC-36).
+// Instantiating takes a millisecond or two, and an instance that aborts takes nothing else with it.
+async function newModule(memoryLimitBytes: number):
+    Promise<{ quickjs: QuickJSWASMModule; malloc: Malloc; atCeiling: () => boolean }> {
+  const pages = (bytes: number) => Math.ceil(bytes / WASM_PAGE_BYTES);
+  // 2 GiB is the module's own maximum, and a limit past it, or QuickJS's -1 for none, gets that.
+  const ceiling = pages(2 * 1024 ** 3);
+  const wasmMemory = new WebAssembly.Memory({
+    initial: pages(MODULE_INITIAL_BYTES),
+    maximum: memoryLimitBytes < 0 ? ceiling : Math.min(ceiling, pages(MODULE_INITIAL_BYTES) + pages(memoryLimitBytes)),
+  });
+  // Emscripten grows the heap with some slack and gives up when even that is refused, so the heap
+  // stops short of its maximum. A refused grow is what says the ceiling was reached, unless a smaller
+  // grow then succeeds: Emscripten tries its largest slack first and settles for less.
+  let refused = false;
+  const grow = wasmMemory.grow.bind(wasmMemory);
+  wasmMemory.grow = (delta) => {
+    try {
+      const pages = grow(delta);
+      refused = false;
+      return pages;
+    } catch (error) {
+      refused = true;
+      throw error;
+    }
+  };
+  const quickjs = await newQuickJSWASMModule(newVariant(RELEASE_SYNC, { wasmMemory }));
+  // The bindings copy host strings into the realm with this malloc and never check its result, so a
+  // full heap had them write the string through a null pointer. The wrapper throws first instead.
+  const malloc = (quickjs as unknown as { module: Malloc }).module;
+  if (typeof malloc._malloc !== "function") throw new Error("quickjs-emscripten no longer exposes _malloc");
+  return { quickjs, malloc, atCeiling: () => refused };
+}
+
+interface Malloc { _malloc(bytes: number): number }
 
 /** Strips the types from a checked program, leaving a classic script. */
 export function transpile(code: string): string {
@@ -70,9 +110,20 @@ export function transpile(code: string): string {
 export async function runProgram(code: string, options: RunOptions = {}): Promise<RunResult> {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const deadline = Date.now() + timeoutMs;
-  const quickjs = await loadQuickJS();
+  const memoryLimitBytes = options.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT;
+  const { quickjs, malloc, atCeiling } = await newModule(memoryLimitBytes);
+  let outOfMemory = false;
+  const allocate = malloc._malloc;
+  malloc._malloc = (bytes) => {
+    const pointer = allocate(bytes);
+    if (pointer === 0) {
+      outOfMemory = true;
+      throw new Error(OUT_OF_MEMORY);
+    }
+    return pointer;
+  };
   const runtime = quickjs.newRuntime();
-  runtime.setMemoryLimit(options.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT);
+  runtime.setMemoryLimit(memoryLimitBytes);
   runtime.setMaxStackSize(MAX_STACK_BYTES);
   runtime.setInterruptHandler(shouldInterruptAfterDeadline(deadline));
   const context = runtime.newContext();
@@ -91,7 +142,11 @@ export async function runProgram(code: string, options: RunOptions = {}): Promis
   const checkDeadline = () => {
     if (Date.now() >= deadline) throw new Error(overBudget());
   };
-  const fail = (error: string): RunResult => ({ ok: false, error, logs });
+  // A heap at its ceiling has no room for QuickJS to build its own "out of memory" error, so the
+  // program sees null thrown and the host reads it as "null" or nothing. Only that error is relabelled:
+  // a program that filled the heap and freed it again can still fail for a reason of its own.
+  const fail = (error: string): RunResult =>
+    ({ ok: false, error: atCeiling() && (error === "" || error === "null") ? OUT_OF_MEMORY : error, logs });
 
   // Captured before the program runs, so the program cannot replace the parser tool results use, or
   // the serialiser tool arguments and logged values go through.
@@ -190,6 +245,9 @@ export async function runProgram(code: string, options: RunOptions = {}): Promis
       const result = evaluated.value;
       try {
         for (;;) {
+          // A tool result or rejection that found no room in the realm was dropped, so the program
+          // would wait on it forever.
+          if (outOfMemory) return fail(OUT_OF_MEMORY);
           const jobs = runtime.executePendingJobs();
           if (jobs.error) {
             const error = jobs.error.consume(dump);
@@ -224,6 +282,7 @@ export async function runProgram(code: string, options: RunOptions = {}): Promis
         result.dispose();
       }
     } catch (error) {
+      if (outOfMemory) return fail(OUT_OF_MEMORY);
       if (Date.now() >= deadline) return fail(overBudget());
       return fail(error instanceof Error ? error.message : String(error));
     }
@@ -241,8 +300,7 @@ export async function runProgram(code: string, options: RunOptions = {}): Promis
   } catch (error) {
     // Freeing a runtime that still holds live objects aborts the WebAssembly instance. QuickJS
     // itself leaks this way when the budget interrupts an unbounded chain of async returns. The
-    // module is dropped so the next run loads a new one, and a run that had succeeded now fails.
-    quickjsModule = undefined;
+    // instance was this run's alone, so a run that had succeeded now fails and nothing else does.
     if (outcome.ok) return { ok: false, error: `the QuickJS runtime could not be released: ${String(error)}`, logs };
   }
   return outcome;

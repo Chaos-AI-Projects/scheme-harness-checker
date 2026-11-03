@@ -104,6 +104,19 @@ test("memory exhaustion fails the run instead of the host", async () => {
   assert.deepEqual(await runProgram(`1;`), { ok: true, value: 1, logs: [] });
 });
 
+test("the memory limit bounds the bytes a program allocates, not only how many allocations it makes", async () => {
+  // Each array holds 10000 eight-byte values, about 80 KB, so a 16 MiB realm fits a few hundred.
+  // QuickJS here counts allocations rather than their sizes, so its own limit let this reach 2 GiB.
+  const r = await runProgram(
+    `const xs: number[][] = [];
+     try { for (let i = 0; i < 1000000; i++) { xs.push(new Array<number>(10000).fill(i)); } } catch (e) { }
+     xs.length;`,
+    { memoryLimitBytes: 16 * 1024 * 1024 },
+  );
+  assert.equal(r.ok, true);
+  assert.ok(r.ok && (r.value as number) < 1000, `allocated ${valueOf(r)} arrays of 10000 values`);
+});
+
 test("unbounded recursion fails the run, and the next run still works", async () => {
   for (let i = 0; i < 3; i++) {
     const r = await runProgram(`function f(n: number): number { return f(n + 1); } f(0);`);
@@ -254,9 +267,69 @@ test("a tool result the exhausted realm cannot hold leaves no unhandled rejectio
        main();`,
       { tools: { t: async () => "y".repeat(2_000_000) }, memoryLimitBytes: 16 * 1024 * 1024, timeoutMs: 3000 },
     );
-    assert.equal(r.ok, false);
+    // The heap fills before the result arrives and main() rejects, so the run ends without copying
+    // the result in. Before HC-36 the heap grew to 2 GiB, the copy wrote through null, and the suite hung.
+    assert.deepEqual(r, { ok: false, error: "the program ran out of memory", logs: [] });
     await new Promise((r) => setTimeout(r, 100));
   });
+});
+
+test("a tool result copied into a full heap fails the run instead of writing through null", async () => {
+  await withoutUnhandledRejections(async () => {
+    // A write through null corrupts the module, which then aborts with the same result, so what tells
+    // the two apart is the abort the module prints.
+    const printed: string[] = [];
+    const error = console.error;
+    console.error = (...args: unknown[]) => { printed.push(args.map(String).join(" ")); };
+    const r = await runProgram(
+      `async function main(): Promise<number> {
+         const p = t({});
+         const xs: number[][] = [];
+         try { for (let i = 0; i < 1000000000; i++) { xs.push(new Array<number>(10000).fill(i)); } } catch (e) { }
+         xs.pop(); xs.pop();
+         const v = await p;
+         return v.length + xs.length;
+       }
+       main();`,
+      { tools: { t: async () => "y".repeat(2_000_000) }, memoryLimitBytes: 16 * 1024 * 1024, timeoutMs: 3000 },
+    ).finally(() => { console.error = error; });
+    // The program frees a little room and is alive when the result arrives, so the host does copy it
+    // in. The heap cannot hold 2 MB, and malloc's null once had the bindings write there (HC-36).
+    assert.deepEqual(r, { ok: false, error: "the program ran out of memory", logs: [] });
+    assert.deepEqual(printed.filter((line) => /Aborted/.test(line)).map((line) => line.slice(0, 40)), []);
+    await new Promise((r) => setTimeout(r, 100));
+  });
+});
+
+test("a program's own error is not relabelled after one of the heap's grows was refused", async () => {
+  // Emscripten asks for its largest grow first and settles for a smaller one, so a refused grow
+  // alone does not mean the heap is full.
+  const r = await runProgram(
+    `const xs: number[][] = [];
+     for (let i = 0; i < 250; i++) { xs.push(new Array<number>(10000).fill(i)); }
+     throw new Error("mine " + xs.length);`,
+    { memoryLimitBytes: 16 * 1024 * 1024 },
+  );
+  assert.deepEqual(r, { ok: false, error: "Error: mine 250", logs: [] });
+});
+
+test("a program's own error is not relabelled after it filled the heap and freed it", async () => {
+  const r = await runProgram(
+    `let xs: number[][] = [];
+     try { for (let i = 0; i < 1000000000; i++) { xs.push(new Array<number>(10000).fill(i)); } } catch (e) { }
+     const filled = xs.length;
+     xs = [];
+     throw new Error("mine " + (filled > 0));`,
+    { memoryLimitBytes: 16 * 1024 * 1024 },
+  );
+  assert.deepEqual(r, { ok: false, error: "Error: mine true", logs: [] });
+});
+
+test("a memory limit past the module's 2 GiB, or QuickJS's -1 for none, still runs the program", async () => {
+  for (const memoryLimitBytes of [3 * 1024 ** 3, -1]) {
+    const r = await runProgram(`const xs: number[] = new Array<number>(5000000).fill(1); xs.length;`, { memoryLimitBytes });
+    assert.deepEqual(r, { ok: true, value: 5000000, logs: [] }, `memoryLimitBytes ${memoryLimitBytes}`);
+  }
 });
 
 test("throwing or logging a promise does not double-free its handle", async () => {

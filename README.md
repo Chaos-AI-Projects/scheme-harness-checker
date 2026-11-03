@@ -275,7 +275,7 @@ Options:
 
 - `description` replaces the first paragraph of the tool's description.
 - `timeoutMs` is the wall-clock budget for one run, tool calls included. The default is 5000.
-- `memoryLimitBytes` is the QuickJS heap limit. The default is 64 MiB.
+- `memoryLimitBytes` caps how far a run's wasm memory can grow past its initial 16 MiB. The default is 64 MiB.
 
 ### CLI
 

@@ -734,3 +734,49 @@ test("a program nested deeper than the checker's stack is rejected, not thrown",
     assertRejected(code, "unsupported-syntax");
   }
 });
+
+// HC-28: typeof alone leaves a JSON value at `object`, which has no fields. Object.entries and
+// Object.values over `object` give its values as `unknown`, which typeof then narrows.
+const JSON_TOOL_RESULT = `
+  async function main(): Promise<number> {
+    const raw: unknown = JSON.parse('{"a": 1, "b": "x", "c": 2}');
+    let total = 0;
+    if (typeof raw === "object" && raw !== null) {
+      for (const entry of Object.entries(raw)) {
+        const [key, value] = entry;
+        if (typeof value === "number" && key !== "skip") {
+          total += value;
+        }
+      }
+      for (const value of Object.values(raw)) {
+        if (typeof value === "string") {
+          console.log(value.toUpperCase());
+        }
+      }
+    }
+    return total;
+  }
+  main();
+`;
+
+test("a JSON tool result is read by narrowing with typeof and iterating entries and values", () => {
+  assertClean(JSON_TOOL_RESULT);
+});
+
+test("Object.values over a record keeps its value type", () => {
+  assertClean(`const o: { [k: string]: number } = { a: 1 }; let s = 0; for (const v of Object.values(o)) { s += v; } console.log(s);`);
+});
+
+test("typeof narrowing opens no escape and hides no loop", () => {
+  assertRejected(`const p: unknown = JSON.parse("{}");
+    if (typeof p === "object" && p !== null) { for (const v of Object.values(p)) { if (typeof v === "function") { v(); } } }`,
+    "any-type");
+  const loop = checkTypeScript(`function f(x: unknown): number { if (typeof x === "number") { return f(x); } return 0; } f(1);`,
+    { toolDeclarations: TOOLS });
+  assert.equal(loop.ok, false);
+  assert.ok(loop.violations.every((v) => v.kind !== "unsupported-syntax"), JSON.stringify(loop.violations));
+});
+
+test("a call inside a typeof operand is still analysed", () => {
+  assertRejected(`function f(): number { return typeof f() === "number" ? 1 : 0; } f();`, "no-decreasing-arg");
+});

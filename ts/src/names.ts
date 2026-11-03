@@ -45,8 +45,8 @@ export const BUILTIN_MEMBERS: ReadonlySet<string> = (() => {
 })();
 
 // A known limit: declared member names form one flat set, not one set per receiver. A name the lib
-// declares on one type (entries on Object) is readable on any value a type lie reaches, such as
-// Array.prototype.entries, and a tool's member names widen the set the same way. No path from
+// declares on one type (entries and values on Object) is readable on any value a type lie reaches,
+// such as Array.prototype.entries or values, and a tool's member names widen the set the same way. No path from
 // those names to Function is known; the QuickJS realm is the layer that covers what remains.
 
 export interface Declared {

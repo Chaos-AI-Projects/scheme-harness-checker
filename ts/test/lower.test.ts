@@ -479,3 +479,11 @@ test("a program nested deeper than the lowering's stack is a violation, not a th
   assert.deepEqual(ir, []);
   assert.deepEqual(violations.map((v) => v.kind), ["unsupported-syntax"]);
 });
+
+// HC-28: typeof has no effect, always returns and calls no user code, so a free call is exact enough.
+test("typeof lowers to a free call, and its comparison through the === path", () => {
+  assert.equal(
+    lowered("const f = (d: unknown): boolean => typeof d === \"object\" && d !== null;"),
+    '(define js.f (lambda (js.d) (and (eqv? (js.%typeof js.d) "object") (not (eqv? js.d js.null)))))',
+  );
+});

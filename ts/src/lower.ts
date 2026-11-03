@@ -401,6 +401,8 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     if (ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e)) return count(e.text);
     if (e.kind === ts.SyntaxKind.TrueKeyword) return count(true);
     if (e.kind === ts.SyntaxKind.FalseKeyword) return count(false);
+    // Like `undefined`, null is a leaf to the analysis. No identifier can be named null.
+    if (e.kind === ts.SyntaxKind.NullKeyword) return count(sym("js.null"));
     if (ts.isIdentifier(e)) return (useSite ? seeThrough(e) : undefined) ?? count(name(e));
     if (ts.isAsExpression(e) && ts.isConstTypeReference(e.type)) return expr(e.expression);
     if (ts.isArrowFunction(e)) {
@@ -408,6 +410,9 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       const body = ts.isBlock(e.body) ? block(e.body.statements, 0) : expr(e.body);
       return count([S.lambda, formals, withBindings(bindings, body)]);
     }
+    // typeof has no effect, always returns and calls no user code, so a free call is sound. It is
+  // conservative: the operand escapes, so `typeof g` inside g reads as g escaping.
+    if (ts.isTypeOfExpression(e)) return count([sym("js.%typeof"), expr(e.expression)]);
     if (ts.isConditionalExpression(e)) return count([S.if, expr(e.condition), expr(e.whenTrue), expr(e.whenFalse)]);
     if (ts.isPrefixUnaryExpression(e)) {
       if (e.operator === ts.SyntaxKind.ExclamationToken) return count([S.not, expr(e.operand)]);

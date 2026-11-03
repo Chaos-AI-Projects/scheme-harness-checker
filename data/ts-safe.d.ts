@@ -141,6 +141,11 @@ declare var Array: ArrayConstructor;
 interface ObjectConstructor {
   keys(o: object): string[];
   entries<T>(o: { readonly [key: string]: T }): [string, T][];
+  // After typeof narrows a JSON value to `object` it has no fields, and `in` and `as` are banned.
+  // These overloads are the path to its values, as `unknown` for typeof to narrow again.
+  entries(o: object): [string, unknown][];
+  values<T>(o: { readonly [key: string]: T }): T[];
+  values(o: object): unknown[];
 }
 declare var Object: ObjectConstructor;
 

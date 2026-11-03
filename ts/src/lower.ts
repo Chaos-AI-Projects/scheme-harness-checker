@@ -143,6 +143,13 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     if (clause && ts.isCaseOrDefaultClause(clause) && !ts.findAncestor(id, (n) => n === clause)) {
       throw new Unsupported(id, `${id.text} is bound in another case of the switch`);
     }
+    // HC-35: a statement's letrec* scopes only over what follows it, so a closure naming a binding of
+    // a later statement would read a free name, a leaf to the analysis, and any cycle through it would
+    // vanish. Bindings of one statement share its letrec*, so they may name each other.
+    const statement = ts.findAncestor(s.valueDeclaration, ts.isVariableStatement);
+    if (statement && id.getStart(sf) < statement.getStart(sf)) {
+      throw new Unsupported(id, `${id.text} is named before the statement that declares it: declare it first, or bind both in one const statement`);
+    }
     let v = fresh.get(s);
     if (!v) fresh.set(s, (v = sym(`js.${id.text}%${fresh.size + 1}`)));
     return v;

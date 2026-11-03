@@ -869,7 +869,38 @@ test("a closure's forward reference to a function-body binding is not captured b
       const n = 1 / 0;
       return h();
     }
-    g();`, "infinite-loop");
+    g();`, "unsupported-syntax");
+});
+
+// HC-35: each const statement in a block is its own letrec*, so a closure naming a binding declared
+// by a later statement sits outside that binding's scope. block() copies the rest of a block into each
+// branch, and alpha-renaming each copy left the forward name free, so the cycle below was a leaf.
+test("a closure naming a binding a later statement declares is unsupported", () => {
+  const tail = `const h = (n: number): number => k(n); const k = (n: number): number => h(n); return h(1); } f(true);`;
+  for (const lead of [
+    "if (c) { console.log(1); }",
+    "try { console.log(1); } catch (e) { console.log(2); }",
+    "switch (c) { case true: console.log(1); break; default: console.log(2); break; }",
+    "",
+  ]) {
+    assertRejected(`function f(c: boolean): number { ${lead} ${tail}`, "unsupported-syntax");
+  }
+  assertRejected(`function g(): number {
+      for (let i = 0; i < 3; i++) { const h = (): number => k(); const k = (): number => h(); console.log(h()); }
+      return 0;
+    }
+    g();`, "unsupported-syntax");
+});
+
+test("bindings of one const statement may name each other, and their cycle is still found", () => {
+  const code = `function f(c: boolean): number {
+      if (c) { console.log(1); }
+      const h = (n: number): number => k(n), k = (n: number): number => h(n);
+      return h(1);
+    }
+    f(true);`;
+  assertRejected(code, "no-decreasing-arg");
+  assert.ok(!kinds(code).includes("unsupported-syntax"), JSON.stringify(kinds(code)));
 });
 
 test("a violation in a block-scoped function names it without its fresh suffix", () => {

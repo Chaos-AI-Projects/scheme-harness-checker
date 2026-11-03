@@ -26,7 +26,7 @@ const ALLOWED = new Set<ts.SyntaxKind>([
   K.VariableDeclaration, K.FunctionDeclaration, K.Parameter, K.ReturnStatement, K.IfStatement,
   K.SwitchStatement, K.CaseBlock, K.CaseClause, K.DefaultClause, K.BreakStatement,
   K.ContinueStatement, K.ThrowStatement, K.TryStatement, K.CatchClause, K.ForStatement,
-  K.ForOfStatement, K.WhileStatement, K.TypeAliasDeclaration,
+  K.ForOfStatement, K.WhileStatement, K.TypeAliasDeclaration, K.InterfaceDeclaration,
   // expressions
   K.Identifier, K.NumericLiteral, K.StringLiteral, K.NoSubstitutionTemplateLiteral,
   K.TemplateExpression, K.TemplateHead, K.TemplateMiddle, K.TemplateTail, K.TemplateSpan,
@@ -267,6 +267,21 @@ export function checkSubset(sf: ts.SourceFile, ctx: SubsetContext): Violation[] 
         }
         break;
       }
+      case K.InterfaceDeclaration: {
+        // Property signatures only: a method signature is bivariant, an index, call or construct
+        // signature is surface nobody asked for, and extends is a heritage clause the gate leaves out.
+        const decl = node as ts.InterfaceDeclaration;
+        decl.modifiers?.forEach(visit);
+        visit(decl.name);
+        decl.typeParameters?.forEach(visit);
+        decl.heritageClauses?.forEach(visit);
+        for (const m of decl.members) {
+          // visitType reports a method signature with the reason.
+          if (ts.isPropertySignature(m) || ts.isMethodSignature(m)) visitType(m);
+          else report(m, "unsupported-syntax", "an interface may declare property signatures only");
+        }
+        return;
+      }
       case K.VariableDeclaration:
         if ((node as ts.VariableDeclaration).exclamationToken) {
           report(node, "cast", "definite assignment assertions are forbidden");
@@ -350,7 +365,8 @@ function isReceiverOrCallee(id: ts.Identifier): boolean {
 function isDeclarationName(id: ts.Identifier): boolean {
   const p = id.parent;
   return ((ts.isVariableDeclaration(p) || ts.isFunctionDeclaration(p) || ts.isParameter(p) ||
-           ts.isBindingElement(p) || ts.isTypeAliasDeclaration(p) || ts.isTypeParameterDeclaration(p)) &&
+           ts.isBindingElement(p) || ts.isTypeAliasDeclaration(p) || ts.isInterfaceDeclaration(p) ||
+           ts.isTypeParameterDeclaration(p)) &&
           p.name === id);
 }
 

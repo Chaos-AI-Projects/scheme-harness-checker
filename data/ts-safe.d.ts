@@ -205,6 +205,10 @@ interface PromiseConstructor {
 }
 declare var Promise: PromiseConstructor;
 
+// Keys are strings only: a number or symbol key would reach the cases the gate's `in` and computed
+// name bans keep out.
+type Record<K extends string, T> = { [P in K]: T };
+
 interface Console {
   log(...data: unknown[]): void;
 }

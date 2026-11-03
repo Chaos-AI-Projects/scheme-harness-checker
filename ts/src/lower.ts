@@ -747,6 +747,7 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       return s.expression ? expr(s.expression) : count([S.void]);
     }
     if (ts.isThrowStatement(s)) return count([sym("raise"), expr(s.expression)]);
+    if (isTypeOnly(s)) return block(stmts, i + 1, inLoop);
     if (ts.isBlock(s)) return block([...s.statements, ...stmts.slice(i + 1)], 0, inLoop);
     if (ts.isForStatement(s)) return count([S.begin, forLoop(s), block(stmts, i + 1, inLoop)]);
     if (ts.isForOfStatement(s)) return count([S.begin, forOf(s), block(stmts, i + 1, inLoop)]);
@@ -809,7 +810,11 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     return lowerFrom(0);
   };
 
+  // Types are erased at run time, so a type alias or an interface lowers to nothing.
+  const isTypeOnly = (s: ts.Statement): boolean => ts.isTypeAliasDeclaration(s) || ts.isInterfaceDeclaration(s);
+
   const top = (s: ts.Statement): Datum[] => {
+    if (isTypeOnly(s)) return [];
     if (ts.isFunctionDeclaration(s) && s.name && s.body) {
       const { formals, bindings } = params(s);
       return [count([S.define, [name(s.name), ...formals], withBindings(bindings, block(s.body.statements, 0))])];

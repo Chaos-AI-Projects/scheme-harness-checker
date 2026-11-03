@@ -882,3 +882,72 @@ test("a violation in a block-scoped function names it without its fresh suffix",
   assert.ok(result.violations.some((v) => v.message.startsWith("go: ")), JSON.stringify(result.violations));
   assert.ok(result.violations.every((v) => !v.message.includes("%")), JSON.stringify(result.violations));
 });
+
+// HC-30. Types are erased, so a type alias or an interface lowers to nothing wherever it sits.
+test("a type alias and an interface are skipped by the lowering, at top level and in a block", () => {
+  assertClean(`
+    type Point = { x: number; y: number };
+    interface Named { readonly name: string; tag?: string; pos: Point; f: (p: Point) => number }
+    function norm(p: Point): number {
+      type Sq = number;
+      interface Box { v: Sq }
+      const b: Box = { v: p.x * p.x + p.y * p.y };
+      return b.v;
+    }
+    const n: Named = { name: "a", pos: { x: 1, y: 2 }, f: norm };
+    console.log(norm(n.pos) + n.name.length);
+  `);
+});
+
+test("Record<K, T> is declared by the lib and lowers as a record", () => {
+  assertClean(`
+    const counts: Record<string, number> = { a: 1, b: 2 };
+    let total = 0;
+    for (const v of Object.values(counts)) { total += v; }
+    for (const k of Object.keys(counts)) { console.log(k); }
+    const fixed: Record<"x" | "y", number> = { x: 1, y: 2 };
+    console.log(total + fixed.x);
+  `);
+});
+
+test("an interface admits property signatures only", () => {
+  for (const [code, kind] of [
+    [`interface I { m(x: unknown): number }`, "unsupported-syntax"],
+    [`interface I { [k: string]: number }`, "unsupported-syntax"],
+    [`interface I { (x: number): number }`, "unsupported-syntax"],
+    [`interface I { new (x: number): I }`, "unsupported-syntax"],
+    [`interface A { a: number } interface B extends A { b: number }`, "unsupported-syntax"],
+    [`export interface I { a: number }`, "unsupported-syntax"],
+    [`declare interface I { a: number }`, "unsupported-syntax"],
+    [`interface I { a: any }`, "any-type"],
+    [`interface I<T = any> { a: T }`, "any-type"],
+    [`const r: Record<number, string> = {};`, "type-error"],
+  ]) {
+    assertRejected(code, kind);
+  }
+});
+
+test("an interface or type alias may not reopen a lib or tool type", () => {
+  for (const code of [
+    `interface Array<T> { evil: (x: T) => void }`,
+    `interface String { constructor: unknown }`,
+    `interface Record { a: number }`,
+    `type Record<K extends string, T> = { [P in K]: T };`,
+  ]) {
+    assert.ok(kinds(code).includes("unsupported-syntax"), `${code}: ${JSON.stringify(kinds(code))}`);
+  }
+});
+
+// The method-signature hole of PR #760, reached through an interface instead of a type literal.
+test("an interface method signature is rejected, its parameters are bivariant", () => {
+  assertRejected(`
+    interface M { m(x: unknown, n: number): number }
+    function f(x: unknown[], n: number): number {
+      if (n < 0) return 0;
+      const o: M = { m: f };
+      const m = o.m;
+      return m(x[0], n + 1);
+    }
+    f(["a"], 0);
+  `, "unsupported-syntax");
+});

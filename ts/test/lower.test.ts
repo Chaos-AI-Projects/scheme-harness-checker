@@ -35,7 +35,7 @@ test("a function declaration lowers to define, arithmetic to the Scheme operator
 test("an if with no else takes the rest of the block as its else branch", () => {
   assert.equal(
     lowered("function g(n: number): number { if (n > 3) { return 1; } const m = n * 2; return m + 1; }"),
-    "(define (js.g js.n) (if (> js.n 3) 1 (letrec* ((js.m (* js.n 2))) (+ js.m 1))))",
+    "(define (js.g js.n) (if (> js.n 3) 1 (letrec* ((js.m%1 (* js.n 2))) (+ js.m%1 1))))",
   );
 });
 
@@ -43,7 +43,7 @@ test("the rest of a block is copied into each branch that falls through", () => 
   const ir = lowered("function h(n: number): number { let a = 0; if (n > 1) { a = 1; } else { a = 2; } return a; }");
   assert.equal(
     ir,
-    "(define (js.h js.n) (letrec* ((js.a 0)) (if (> js.n 1) (begin (set! js.a 1) js.a) (begin (set! js.a 2) js.a))))",
+    "(define (js.h js.n) (letrec* ((js.a%1 0)) (if (> js.n 1) (begin (set! js.a%1 1) js.a%1) (begin (set! js.a%1 2) js.a%1))))",
   );
 });
 
@@ -120,15 +120,57 @@ test("a construct the lowering does not know yet is unsupported-syntax, never dr
   unsupported("const xs = [1]; const y = xs.pop();");
 });
 
-test("a block that declares a binding is unsupported until scoping is lowered, not spliced", () => {
-  unsupported("function f(n: number): number { const a = 1; if (n > 0) { const a = 2; } return a; }");
-  unsupported("function f(n: number): number { const a = 1; { const a = 2; } return a; }");
+// HC-29: a block is spliced in front of the statements after it, so each binding it declares gets a
+// fresh name. A later statement naming the outer binding keeps the outer name.
+test("a binding in a spliced block gets a fresh name that the rest of the block cannot capture", () => {
+  assert.equal(
+    lowered("function f(n: number): number { const a = 1; if (n > 0) { const a = 2; fetchCount(a); } return a; }"),
+    "(define (js.f js.n) (letrec* ((js.a%1 1)) (if (> js.n 0) (letrec* ((js.a%2 2)) (begin (js.fetchCount js.a%2) js.a%1)) js.a%1)))",
+  );
+  assert.equal(
+    lowered("function f(n: number): number { const a = 1; { const a = 2; fetchCount(a); } return a; }"),
+    "(define (js.f js.n) (letrec* ((js.a%1 1)) (letrec* ((js.a%2 2)) (begin (js.fetchCount js.a%2) js.a%1))))",
+  );
+});
+
+test("try, catch and case bindings and the catch variable get fresh names", () => {
+  assert.equal(
+    lowered("function f(e: number): number { try { const a = e; fetchCount(a); } catch (e) { const b = 1; fetchCount(b); } return e; }"),
+    "(define (js.f js.e) (guard (js.e%1 (#t (letrec* ((js.b%2 1)) (begin (js.fetchCount js.b%2) js.e)))) " +
+      "(letrec* ((js.a%3 js.e)) (begin (js.fetchCount js.a%3) js.e))))",
+  );
+  assert.equal(
+    lowered("function f(k: number): number { switch (k) { case 1: const a = 2; return a; default: const b = k; fetchCount(b); break; } return k; }"),
+    "(define (js.f js.k) (if (eqv? js.k 1) (letrec* ((js.a%1 2)) js.a%1) (letrec* ((js.b%2 js.k)) (begin (js.fetchCount js.b%2) js.k))))",
+  );
+});
+
+// A case's binding scopes over the whole switch in JavaScript, so a later case could name it and
+// throw for touching it before its declaration ran. The IR has no binding there to model that.
+test("a case binding named outside its own case is unsupported-syntax", () => {
+  // TypeScript rejects a direct use (TS2454) but not one inside a closure.
+  unsupported("function f(k: number): number { switch (k) { case 1: const a = 2; return a; default: const g = (): number => a; return g(); } }");
+});
+
+test("a destructuring and a shorthand property name the fresh binding", () => {
+  assert.equal(
+    lowered("function f(p: { x: number }): number { if (p.x > 0) { const { x } = p; fetchCount(x); const o = { x }; return o.x; } return 0; }"),
+    "(define (js.f js.p) (if (> (vector-ref js.p \"x\") 0) (letrec* ((js.x%1 (vector-ref js.p \"x\"))) " +
+      "(begin (js.fetchCount js.x%1) (letrec* ((js.o%2 (vector \"x\" js.x%1))) (vector-ref js.o%2 \"x\")))) 0))",
+  );
+});
+
+test("a binding in a function or loop body gets a fresh name too", () => {
+  assert.equal(
+    lowered("function f(xs: number[]): void { const n = 1; for (const x of xs) { const y = x; fetchCount(y); } }"),
+    "(define (js.f js.xs) (letrec* ((js.n%1 1)) (begin (for-each (lambda (js.x) (letrec* ((js.y%2 js.x)) (begin (js.fetchCount js.y%2) (void)))) js.xs) (void))))",
+  );
 });
 
 test("a classic for becomes a do loop whose exit test is the condition's opposite comparison", () => {
   assert.equal(
     lowered("function f(n: number): number { let s = 0; for (let i = 0; i < n; i++) { s = s + i; } return s; }"),
-    "(define (js.f js.n) (letrec* ((js.s 0)) (begin (do ((js.i 0 (+ js.i 1))) ((>= js.i js.n)) (begin (set! js.s (+ js.s js.i)) (void))) js.s)))",
+    "(define (js.f js.n) (letrec* ((js.s%1 0)) (begin (do ((js.i 0 (+ js.i 1))) ((>= js.i js.n)) (begin (set! js.s%1 (+ js.s%1 js.i)) (void))) js.s%1)))",
   );
   assert.equal(
     lowered("function g(xs: number[]): void { for (let i = xs.length; i > 0; i -= 2) { fetchCount(i); } }"),
@@ -154,7 +196,7 @@ test("the do loop a for lowers to meets the do-loop rules: progress accepted, re
 test("for...of becomes for-each over a lambda binding the element", () => {
   assert.equal(
     lowered("function f(xs: number[]): number { let s = 0; for (const x of xs) { s = s + x; } return s; }"),
-    "(define (js.f js.xs) (letrec* ((js.s 0)) (begin (for-each (lambda (js.x) (begin (set! js.s (js.%+ js.s js.x)) (void))) js.xs) js.s)))",
+    "(define (js.f js.xs) (letrec* ((js.s%1 0)) (begin (for-each (lambda (js.x) (begin (set! js.s%1 (js.%+ js.s%1 js.x)) (void))) js.xs) js.s%1)))",
   );
 });
 
@@ -183,7 +225,7 @@ test("a while whose body ends in one update of a variable becomes a do loop step
   );
   assert.equal(
     lowered("function g(n: number): void { let i = 0; while (i < n) i++; }"),
-    "(define (js.g js.n) (letrec* ((js.i 0)) (begin (set! js.i (do ((js.i js.i (+ js.i 1))) ((>= js.i js.n) js.i) (void))) (void))))",
+    "(define (js.g js.n) (letrec* ((js.i%1 0)) (begin (set! js.i%1 (do ((js.i%1 js.i%1 (+ js.i%1 1))) ((>= js.i%1 js.n) js.i%1) (void))) (void))))",
   );
   const { ir } = lowerTypeScript("function f(n: number): void { while (n > 0) { fetchCount(n); n--; } }", { toolDeclarations: TOOLS });
   assert.deepEqual(analyzeDoForms(ir), []);
@@ -222,10 +264,9 @@ test("a switch lowers to nested ifs on eqv?, with the rest of the block after ea
   );
 });
 
-test("a switch that falls through, breaks early, binds, or puts default first is unsupported-syntax", () => {
+test("a switch that falls through, breaks early, or puts default first is unsupported-syntax", () => {
   unsupported("function f(n: number): number { switch (n) { case 1: n = 2; case 2: return n; } return 0; }");
   unsupported("function f(n: number): number { switch (n) { case 1: if (n > 0) { break; } return 1; } return 0; }");
-  unsupported("function f(n: number): number { switch (n) { case 1: const m = 2; return m; } return 0; }");
   unsupported("function f(n: number): number { switch (n) { default: return 0; case 1: return 1; } }");
   unsupported("function f(n: number): number { switch (n + 1) { case 1: return 1; } return 0; }");
 });
@@ -233,7 +274,7 @@ test("a switch that falls through, breaks early, binds, or puts default first is
 test("try/catch lowers to guard, with the rest of the block copied into both", () => {
   assert.equal(
     lowered("function f(n: number): number { try { fetchCount(n); } catch (e) { return 0; } return n; }"),
-    "(define (js.f js.n) (guard (js.e (#t 0)) (begin (js.fetchCount js.n) js.n)))",
+    "(define (js.f js.n) (guard (js.e%1 (#t 0)) (begin (js.fetchCount js.n) js.n)))",
   );
   assert.equal(
     lowered("function g(n: number): number { try { return n; } catch { n = 1; } return n; }"),
@@ -241,9 +282,8 @@ test("try/catch lowers to guard, with the rest of the block copied into both", (
   );
 });
 
-test("finally, and a try or catch block that binds, are unsupported-syntax", () => {
+test("finally is unsupported-syntax", () => {
   unsupported("function f(n: number): number { try { return n; } finally { fetchCount(n); } }");
-  unsupported("function f(n: number): number { try { const m = n; return m; } catch (e) { return 0; } }");
 });
 
 test("an object literal may not define a member JavaScript calls implicitly", () => {
@@ -290,7 +330,7 @@ test("a method call on a record is unsupported, the lowering does not place it",
 test("object destructuring reads each field with vector-ref, from a temporary bound first unless the source is a variable", () => {
   assert.equal(
     lowered("async function f(): Promise<number> { const { tempC, tempC: t } = await getWeather({ city: \"x\" }); return tempC + t; }"),
-    '(define (js.f) (letrec* ((%js.tmp1 (js.getWeather (vector "city" "x"))) (js.tempC (vector-ref %js.tmp1 "tempC")) (js.t (vector-ref %js.tmp1 "tempC"))) (js.%+ js.tempC js.t)))',
+    '(define (js.f) (letrec* ((%js.tmp1 (js.getWeather (vector "city" "x"))) (js.tempC%1 (vector-ref %js.tmp1 "tempC")) (js.t%2 (vector-ref %js.tmp1 "tempC"))) (js.%+ js.tempC%1 js.t%2)))',
   );
   assert.equal(
     lowered("const o = { a: 1 }; const { a } = o;"),
@@ -301,7 +341,7 @@ test("object destructuring reads each field with vector-ref, from a temporary bo
 test("array destructuring takes a free index by position and a free slice for the rest", () => {
   assert.equal(
     lowered("function f(xs: number[]): number { const [h, , k, ...rest] = xs; return h + k + rest.length; }"),
-    "(define (js.f js.xs) (letrec* ((js.h (js.%index js.xs 0)) (js.k (js.%index js.xs 2)) (js.rest (js.method.slice js.xs 3))) (js.%+ (js.%+ js.h js.k) (length js.rest))))",
+    "(define (js.f js.xs) (letrec* ((js.h%1 (js.%index js.xs 0)) (js.k%2 (js.%index js.xs 2)) (js.rest%3 (js.method.slice js.xs 3))) (js.%+ (js.%+ js.h%1 js.k%2) (length js.rest%3))))",
   );
 });
 
@@ -313,7 +353,7 @@ test("destructuring with a default or an object rest is unsupported-syntax", () 
 
 test("a block binding is letrec*, so an arrow that calls itself by its const name is seen to recurse", () => {
   const { ir } = lowerTypeScript("function f(): number { const g = (n: number): number => g(n); return g(1); }", { toolDeclarations: TOOLS });
-  assert.equal(ir.map(write).join(" "), "(define (js.f) (letrec* ((js.g (lambda (js.n) (js.g js.n)))) (js.g 1)))");
+  assert.equal(ir.map(write).join(" "), "(define (js.f) (letrec* ((js.g%1 (lambda (js.n) (js.g%1 js.n)))) (js.g%1 1)))");
   assert.ok(checkTermination(ir).length > 0, "the self-call must be a termination violation");
 });
 
@@ -348,7 +388,7 @@ test("a function that calls itself through a spread is still seen to recurse", (
     { toolDeclarations: TOOLS },
   );
   assert.deepEqual(violations, []);
-  assert.equal(ir.map(write).join(" "), "(define (js.h js.n js.m) (letrec* ((js.p (list js.m js.n))) (apply js.h js.p)))");
+  assert.equal(ir.map(write).join(" "), "(define (js.h js.n js.m) (letrec* ((js.p%1 (list js.m js.n))) (apply js.h js.p%1)))");
   assert.ok(checkTermination(ir).length > 0, "a self-call through apply must be a termination violation");
 });
 
@@ -362,7 +402,7 @@ test("a spread into an array HOF is unsupported-syntax", () => {
 test("push on a fresh local array lowers to an escaping free call", () => {
   assert.equal(
     lowered("function f(xs: number[]): number[] { const out: number[] = []; for (const x of xs) { out.push(x * 2); } return out; }"),
-    "(define (js.f js.xs) (letrec* ((js.out (list))) (begin (for-each (lambda (js.x) (begin (js.method.push js.out (* js.x 2)) (void))) js.xs) js.out)))",
+    "(define (js.f js.xs) (letrec* ((js.out%1 (list))) (begin (for-each (lambda (js.x) (begin (js.method.push js.out%1 (* js.x 2)) (void))) js.xs) js.out%1)))",
   );
 });
 
@@ -434,7 +474,7 @@ test("sort and reverse keep the length, so they lower to escaping free calls", (
 test("a pushed array may be the receiver of an array HOF or reader, or spread, since none of them aliases it", () => {
   assert.equal(
     lowered("function f(): number { const out: number[] = []; out.push(1); const ys = out.map((x) => x + 1); const j = out.join(\",\"); return Math.max(...out, ys.length, j.length); }"),
-    '(define (js.f) (letrec* ((js.out (list))) (begin (js.method.push js.out 1) (letrec* ((js.ys (map (lambda (js.x) (js.%+ js.x 1)) js.out))) (letrec* ((js.j (js.method.join js.out ","))) (apply js.Math.max (append js.out (list (length js.ys) (string-length js.j)))))))))',
+    '(define (js.f) (letrec* ((js.out%1 (list))) (begin (js.method.push js.out%1 1) (letrec* ((js.ys%2 (map (lambda (js.x) (js.%+ js.x 1)) js.out%1))) (letrec* ((js.j%3 (js.method.join js.out%1 ","))) (apply js.Math.max (append js.out%1 (list (length js.ys%2) (string-length js.j%3)))))))))',
   );
   unsupported("function f(): number[] { const out: number[] = []; out.push(1); return out.slice(1); }");
   unsupported("function f(): number[] { const out: number[] = []; out.push(1); return out.sort(); }");
@@ -463,11 +503,11 @@ test("unary plus lowers to a one-argument +", () => {
 test("a call argument naming a pure const lowers as its expression only in a call that recurses back (HC-22)", () => {
   assert.equal(
     lowered("function f(n: number): number { const m = n - 1; return m > 0 ? f(m) : m; }"),
-    "(define (js.f js.n) (letrec* ((js.m (- js.n 1))) (if (> js.m 0) (js.f (- js.n 1)) js.m)))",
+    "(define (js.f js.n) (letrec* ((js.m%1 (- js.n 1))) (if (> js.m%1 0) (js.f (- js.n 1)) js.m%1)))",
   );
   assert.equal(
     lowered("function g(a: number): number { return a; } function h(n: number): number { const m = n - 1; return g(m); }"),
-    "(define (js.g js.a) js.a) (define (js.h js.n) (letrec* ((js.m (- js.n 1))) (js.g js.m)))",
+    "(define (js.g js.a) js.a) (define (js.h js.n) (letrec* ((js.m%1 (- js.n 1))) (js.g js.m%1)))",
   );
 });
 

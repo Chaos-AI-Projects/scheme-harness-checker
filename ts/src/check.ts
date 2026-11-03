@@ -87,7 +87,8 @@ function withinStack<T>(check: () => T, rejected: (violations: Violation[]) => T
 // prefix comes off for the report. The violation is placed at the declaration of the function it
 // names; a renamed local or a do-loop has none, and is placed at the start of the program.
 function fromTermination(v: TerminationViolation, sf: ts.SourceFile): Violation {
-  const unprefix = (s: string) => s.replace(/(^|[^\w$.%])js\./g, "$1");
+  // A block-scoped binding's fresh suffix (HC-29) comes off too, so the name is the program's.
+  const unprefix = (s: string) => s.replace(/(^|[^\w$.%])js\./g, "$1").replace(/([\w$])%\d+/g, "$1");
   const fn = v.function !== null && isSym(v.function as Datum) ? unprefix(String(v.function.name)) : null;
   const at = fn === null ? undefined : declarationOf(sf, fn);
   const { line, character } = at ? sf.getLineAndCharacterOfPosition(at.getStart(sf)) : { line: 0, character: 0 };

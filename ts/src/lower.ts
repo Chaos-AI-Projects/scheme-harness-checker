@@ -14,6 +14,11 @@
 // A plain `let` would leave a self-calling arrow's name free, and a free name is a leaf to the
 // analysis, so it would hide the recursion.
 //
+// An if branch, a try or catch block, a nested block and a case clause are spliced in front of the
+// statements after them, so a binding one declares would scope over those too (HC-29). Every binding
+// declared in a block, and a catch variable, gets a fresh name `js.y%N`. Every identifier is resolved to its
+// symbol, so a later statement naming an outer `y` keeps `js.y`.
+//
 // A classic `for` and a narrow `while` become `do` loops and `for...of` a `for-each`, so the existing loop rules judge
 // them. A loop body is lowered as a closed block that may not `return`, `break` or `continue`: each
 // leaves the loop early, and lowering it as a value would lose the function's result.
@@ -124,9 +129,35 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     if (++nodes > MAX_NODES) throw new Unsupported(sf, `lowering grew past ${MAX_NODES} forms; split the early returns into functions`);
     return d;
   };
+  const fresh = new Map<ts.Symbol, Sym>();
   const name = (id: ts.Node): Datum => {
     if (!ts.isIdentifier(id)) throw new Unsupported(id, "only a plain identifier may be bound here");
-    return sym(`js.${id.text}`);
+    // On the name of a shorthand property the checker answers with the property, so `{ a }` asks for
+    // the variable it reads.
+    const s = ts.isShorthandPropertyAssignment(id.parent) && id.parent.name === id
+      ? checker.getShorthandAssignmentValueSymbol(id.parent)
+      : checker.getSymbolAtLocation(id);
+    if (!s?.valueDeclaration || !spliced(s.valueDeclaration)) return sym(`js.${id.text}`);
+    // A case's binding scopes over the whole switch, so a later case can name it before it is bound.
+    const clause = ts.findAncestor(s.valueDeclaration, (n) => ts.isCaseOrDefaultClause(n) || ts.isFunctionLike(n));
+    if (clause && ts.isCaseOrDefaultClause(clause) && !ts.findAncestor(id, (n) => n === clause)) {
+      throw new Unsupported(id, `${id.text} is bound in another case of the switch`);
+    }
+    let v = fresh.get(s);
+    if (!v) fresh.set(s, (v = sym(`js.${id.text}%${fresh.size + 1}`)));
+    return v;
+  };
+  // Whether a declaration is bound in a block rather than at the top level. A function body's binding
+  // is fresh too: its letrec* sits at the declaration, so a closure defined above it would read an
+  // outer binding of the same name. A while loop lifts its body's last statement outside the letrec*.
+  const spliced = (d: ts.Declaration): boolean => {
+    if (ts.isVariableDeclaration(d) && ts.isCatchClause(d.parent)) return true;
+    let n: ts.Node = d;
+    while (ts.isBindingElement(n) || ts.isObjectBindingPattern(n) || ts.isArrayBindingPattern(n) || ts.isVariableDeclaration(n)) n = n.parent;
+    if (!ts.isVariableDeclarationList(n) || !ts.isVariableStatement(n.parent)) return false;
+    const home = n.parent.parent;
+    if (ts.isCaseClause(home) || ts.isDefaultClause(home)) return true;
+    return ts.isBlock(home);
   };
   // A destructuring parameter becomes a temporary, and its bindings open the body as a letrec*.
   const params = (fn: ts.SignatureDeclaration): { formals: Datum[]; bindings: Datum[][] } => {
@@ -716,11 +747,7 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       return s.expression ? expr(s.expression) : count([S.void]);
     }
     if (ts.isThrowStatement(s)) return count([sym("raise"), expr(s.expression)]);
-    if (ts.isBlock(s)) {
-      // Splicing is only sound when the block binds nothing: its bindings would outlive it.
-      if (s.statements.some(ts.isVariableStatement)) throw new Unsupported(s, "a nested block that declares a binding is not lowered yet");
-      return block([...s.statements, ...stmts.slice(i + 1)], 0, inLoop);
-    }
+    if (ts.isBlock(s)) return block([...s.statements, ...stmts.slice(i + 1)], 0, inLoop);
     if (ts.isForStatement(s)) return count([S.begin, forLoop(s), block(stmts, i + 1, inLoop)]);
     if (ts.isForOfStatement(s)) return count([S.begin, forOf(s), block(stmts, i + 1, inLoop)]);
     if (ts.isWhileStatement(s)) return count([S.begin, whileLoop(s), block(stmts, i + 1, inLoop)]);
@@ -729,12 +756,8 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       return count([S.letrec, bindings, block(stmts, i + 1, inLoop)]);
     }
     if (ts.isIfStatement(s)) {
-      const branch = (b: ts.Statement | undefined): Datum => {
-        if (b && ts.isBlock(b) && b.statements.some(ts.isVariableStatement)) {
-          throw new Unsupported(b, "a branch that declares a binding is not lowered yet");
-        }
-        return block([...(b ? (ts.isBlock(b) ? b.statements : [b]) : []), ...stmts.slice(i + 1)], 0, inLoop);
-      };
+      const branch = (b: ts.Statement | undefined): Datum =>
+        block([...(b ? (ts.isBlock(b) ? b.statements : [b]) : []), ...stmts.slice(i + 1)], 0, inLoop);
       return count([S.if, expr(s.expression), branch(s.thenStatement), branch(s.elseStatement)]);
     }
     if (ts.isSwitchStatement(s)) return switchStatement(s, stmts.slice(i + 1), inLoop);
@@ -745,16 +768,10 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       const rest = stmts.slice(i + 1);
       const c = s.catchClause!;
       const v = c.variableDeclaration ? name(c.variableDeclaration.name) : sym("%e");
-      return count([S.guard, [v, [true, closedBlock(c.block, rest, inLoop)]], closedBlock(s.tryBlock, rest, inLoop)]);
+      return count([S.guard, [v, [true, block([...c.block.statements, ...rest], 0, inLoop)]], block([...s.tryBlock.statements, ...rest], 0, inLoop)]);
     }
     if (ts.isExpressionStatement(s)) return count([S.begin, expr(s.expression), block(stmts, i + 1, inLoop)]);
     throw new Unsupported(s, `${ts.SyntaxKind[s.kind]} is not lowered yet`);
-  };
-
-  // A block that cannot leak bindings into the rest it is spliced in front of.
-  const closedBlock = (b: ts.Block, rest: readonly ts.Statement[], inLoop: boolean): Datum => {
-    if (b.statements.some(ts.isVariableStatement)) throw new Unsupported(b, "a block that declares a binding is not lowered yet here");
-    return block([...b.statements, ...rest], 0, inLoop);
   };
 
   // A switch becomes nested ifs on eqv?, which is ===, so the discriminant must be a variable to be
@@ -778,7 +795,6 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
         throw new Unsupported(clause, "default must be the last case of a switch, on its own");
       }
       const body = clause.statements;
-      if (body.some(ts.isVariableStatement)) throw new Unsupported(clause, "a case that declares a binding is not lowered yet");
       const last = body[body.length - 1];
       const ends = last && (ts.isReturnStatement(last) || ts.isThrowStatement(last));
       if (!last || (!ends && !ts.isBreakStatement(last)) || (ts.isBreakStatement(last) && last.label)) {

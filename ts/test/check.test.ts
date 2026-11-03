@@ -780,3 +780,105 @@ test("typeof narrowing opens no escape and hides no loop", () => {
 test("a call inside a typeof operand is still analysed", () => {
   assertRejected(`function f(): number { return typeof f() === "number" ? 1 : 0; } f();`, "no-decreasing-arg");
 });
+
+// HC-29: const and let inside if, try, catch, a nested block and a case clause. Each gets a fresh IR
+// name, so a later statement that names an outer binding is not captured by the block's.
+test("const and let inside if, try, catch, a block and a case are accepted", () => {
+  assertClean(`
+    async function main(): Promise<number> {
+      let total = 0;
+      const raw: unknown = JSON.parse("[1, 2]");
+      if (Array.isArray(raw)) { const n = raw.length; total += n; } else { let m = 1; m = m + 1; total += m; }
+      try { const w = await getWeather({ city: "Sydney" }); total += w.tempC; } catch (e) { const msg = String(e); console.log(msg); }
+      { const inner = total * 2; console.log(inner); }
+      switch (total) { case 0: const z = 1; return z; default: const d = total; console.log(d); break; }
+      return total;
+    }
+    main();
+  `);
+});
+
+test("a branch binding does not capture the outer name that a recursive call decreases", () => {
+  assertClean(`
+    function f(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      if (n > 2) { const n = 5; console.log(n); }
+      return f(n - 1);
+    }
+    f(3);`);
+});
+
+test("a shadowing block binding hides no loop and no recursion", () => {
+  assertRejected(`function f(n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      const k = n;
+      if (n > 1) { const k = n - 1; console.log(k); }
+      return f(k);
+    }
+    f(3);`, "no-decreasing-arg");
+  assertRejected(`function g(n: number): number {
+      let k = 0;
+      { const n = 3; console.log(n); }
+      for (let i = 0; i < n; i++) { k = k + 1; }
+      return k;
+    }
+    g(1 / 0);`, "infinite-loop");
+  assertRejected(`function h(n: number): number {
+      if (n <= 0) return 0;
+      try { console.log(n); } catch (n) { console.log(n); }
+      return h(n);
+    }
+    h(1);`, "no-decreasing-arg");
+});
+
+// Loop bodies get fresh names too: a while loop lifts its body's last statement into the do step,
+// outside the body's letrec*, so a plain inner name there would read the outer counter.
+test("a loop-body binding does not capture the counter the loop condition reads", () => {
+  assertRejected(`let k = 3; while (k > 0) { let k = 5; k = k - 1; }`, "infinite-loop");
+});
+
+// Each guards n before the loop, so with the block's binding captured the loop would look bounded.
+test("a block binding that guards a shadowed name does not bound a loop over the outer one", () => {
+  assertRejected(`function g(n: number): number {
+      let k = 0;
+      { const n = 3; if (!Number.isSafeInteger(n)) return 0; }
+      for (let i = 0; i < n; i++) { k = k + 1; }
+      return k;
+    }
+    g(1 / 0);`, "infinite-loop");
+});
+
+test("a catch variable that guards a shadowed name does not bound a loop over the outer one", () => {
+  assertRejected(`function g(n: number): number {
+      let k = 0;
+      try { throw 1; } catch (n) { if (!Number.isSafeInteger(n)) return 0; }
+      for (let i = 0; i < n; i++) { k = k + 1; }
+      return k;
+    }
+    g(1 / 0);`, "infinite-loop");
+});
+
+// A function body's letrec* sits at the declaration, so a closure defined above it must not read an
+// outer binding of the same name through it.
+test("a closure's forward reference to a function-body binding is not captured by an outer one", () => {
+  assertRejected(`const n = 3;
+    function g(): number {
+      const h = (): number => { let k = 0; for (let i = 0; i < n; i++) { k = k + 1; } return k; };
+      const n = 1 / 0;
+      return h();
+    }
+    g();`, "infinite-loop");
+});
+
+test("a violation in a block-scoped function names it without its fresh suffix", () => {
+  const result = checkTypeScript(`function f(n: number): number {
+      if (n > 0) { const go = (k: number): number => go(k); return go(n); }
+      return 0;
+    }
+    f(1);`, { toolDeclarations: TOOLS });
+  assert.equal(result.ok, false);
+  assert.ok(result.violations.some((v) => v.message.startsWith("go: ")), JSON.stringify(result.violations));
+  assert.ok(result.violations.every((v) => !v.message.includes("%")), JSON.stringify(result.violations));
+});

@@ -200,6 +200,30 @@ test("for...of becomes for-each over a lambda binding the element", () => {
   );
 });
 
+// HC-38: a pattern in the head binds a temporary, destructured at the top of the body, as a
+// destructuring parameter is.
+test("a for...of head pattern binds a temporary the body destructures", () => {
+  assert.equal(
+    lowered("function f(xs: number[][]): void { for (const [a] of xs) { fetchCount(a); } }"),
+    "(define (js.f js.xs) (begin (for-each (lambda (%js.tmp1) (letrec* ((js.a (js.%index %js.tmp1 0))) (begin (js.fetchCount js.a) (void)))) js.xs) (void)))",
+  );
+  assert.equal(
+    lowered("const o: { [k: string]: number } = { a: 1 }; for (const [k, v] of Object.entries(o)) { console.log(k, v); }"),
+    '(define js.o (vector "a" 1)) (begin (for-each (lambda (%js.tmp1) (letrec* ((js.k (js.%index %js.tmp1 0)) (js.v (js.%index %js.tmp1 1))) (begin (js.console.log js.k js.v) (void)))) (js.Object.entries js.o)) (void))',
+  );
+  assert.equal(
+    lowered("const ps = [{ name: \"a\" }]; for (const { name: n } of ps) { console.log(n); }"),
+    '(define js.ps (list (vector "name" "a"))) (begin (for-each (lambda (%js.tmp1) (letrec* ((js.n (vector-ref %js.tmp1 "name"))) (begin (js.console.log js.n) (void)))) js.ps) (void))',
+  );
+});
+
+test("a for...of head pattern the destructuring path cannot lower stays unsupported-syntax", () => {
+  unsupported("function f(xs: number[][]): void { for (const [a = 1] of xs) { fetchCount(a); } }");
+  unsupported("function f(xs: { a: number; b: number }[]): void { for (const { a, ...r } of xs) { fetchCount(a); } }");
+  // An object pattern over an array element would read a field the array has no vector for.
+  unsupported("function f(xs: number[][]): void { for (const { length } of xs) { fetchCount(length); } }");
+});
+
 test("a loop the lowering cannot model is unsupported-syntax", () => {
   // A return, break or continue inside a loop body leaves the loop early; lowering it as a value
   // would lose the function's result, and with it any lambda the result carries.
@@ -215,7 +239,6 @@ test("a loop the lowering cannot model is unsupported-syntax", () => {
   unsupported("function f(n: number): void { for (let i = 0; i < n; i *= 2) { fetchCount(i); } }");
   unsupported("function f(n: number): void { for (var i = 0; i < n; i++) { fetchCount(i); } }");
   unsupported("function f(s: string): void { for (const c of s) { fetchCount(1); } }");
-  unsupported("function f(xs: number[][]): void { for (const [a] of xs) { fetchCount(a); } }");
 });
 
 test("a while whose body ends in one update of a variable becomes a do loop stepping it, assigned back", () => {

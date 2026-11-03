@@ -971,7 +971,17 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       throw new Unsupported(s, "a for...of loop must declare one element with const or let");
     }
     if (!isArray(s.expression)) throw new Unsupported(s.expression, "for...of is lowered only over an array");
-    return count([sym("for-each"), [S.lambda, [name(init.declarations[0].name)], loopBody(s.statement)], expr(s.expression)]);
+    const head = init.declarations[0].name;
+    if (ts.isIdentifier(head)) return count([sym("for-each"), [S.lambda, [name(head)], loopBody(s.statement)], expr(s.expression)]);
+    // HC-38: a pattern in the head binds a temporary, destructured at the top of the body, as a
+    // destructuring parameter is.
+    if (ts.isObjectBindingPattern(head) ? !isRecord(head) : !isArrayNode(head)) {
+      throw new Unsupported(head, "a destructuring pattern must match an object or array type");
+    }
+    const t = sym(`%js.tmp${++temps}`);
+    const bindings: Datum[][] = [];
+    destructure(head, t, bindings);
+    return count([sym("for-each"), [S.lambda, [t], withBindings(bindings, loopBody(s.statement))], expr(s.expression)]);
   };
 
   // stmts[i..] as one expression; falling off the end is (void). Inside a loop body a return has no

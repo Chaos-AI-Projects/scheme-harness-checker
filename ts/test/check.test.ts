@@ -781,6 +781,37 @@ test("a call inside a typeof operand is still analysed", () => {
   assertRejected(`function f(): number { return typeof f() === "number" ? 1 : 0; } f();`, "no-decreasing-arg");
 });
 
+// HC-38: LLM-written code destructures the entry in the for...of head rather than in the body.
+test("a JSON tool result is read with the entry destructured in the for...of head", () => {
+  const head = JSON_TOOL_RESULT.replace(
+    "for (const entry of Object.entries(raw)) {\n        const [key, value] = entry;",
+    "for (const [key, value] of Object.entries(raw)) {",
+  );
+  assert.notEqual(head, JSON_TOOL_RESULT);
+  assertClean(head);
+});
+
+test("a name destructured in a for...of head does not capture the bound a recursive call decreases", () => {
+  assertClean(`
+    function f(n: number, ps: [number, string][]): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      let t = 0;
+      for (const [k, s] of ps) { t += k; console.log(s); }
+      return t + f(n - 1, ps);
+    }
+    f(3, [[1, "a"]]);`);
+  assertRejected(`
+    function f(n: number, ps: [number, string][]): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      let t = 0;
+      for (const [n, s] of ps) { t += f(n - 1, ps); console.log(s); }
+      return t;
+    }
+    f(3, [[1, "a"]]);`, "no-decreasing-arg");
+});
+
 // HC-29: const and let inside if, try, catch, a nested block and a case clause. Each gets a fresh IR
 // name, so a later statement that names an outer binding is not captured by the block's.
 test("const and let inside if, try, catch, a block and a case are accepted", () => {

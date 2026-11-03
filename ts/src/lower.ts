@@ -544,6 +544,9 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       if (op === ts.SyntaxKind.QuestionQuestionToken) return count([S.or, expr(e.left), expr(e.right)]);
       if (op === ts.SyntaxKind.EqualsEqualsEqualsToken) return count([S.eqv, expr(e.left), expr(e.right)]);
       if (op === ts.SyntaxKind.ExclamationEqualsEqualsToken) return count([S.not, [S.eqv, expr(e.left), expr(e.right)]]);
+      if (op === ts.SyntaxKind.EqualsToken && (ts.isPropertyAccessExpression(e.left) || ts.isElementAccessExpression(e.left))) {
+        return fieldAssignment(e, e.left);
+      }
       if (op === ts.SyntaxKind.EqualsToken) return count([S.set, name(e.left), expr(e.right)]);
       if (op === ts.SyntaxKind.PlusEqualsToken || op === ts.SyntaxKind.MinusEqualsToken) {
         const [v, step] = update(e, false);
@@ -751,6 +754,110 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
         ts.isForOfStatement(loop) ? [loop.expression] :
         ts.isWhileStatement(loop) || ts.isDoStatement(loop) ? [loop.expression] : [];
       if (header.some(mentions)) throw new Unsupported(call, "a loop may not push to the array it iterates or tests");
+    }
+  };
+
+  // HC-33: a field write breaks a loop or a recursion bounded by that field, as push breaks one
+  // bounded by a length. So it is lowered under rules that mirror pushable(): a statement `o.k = v`
+  // with a literal key, on a const bound to an object literal in the same function, whose every other
+  // use is a field read, Object.keys/entries/values or a return. The object may not appear in a loop
+  // header, the condition of an if in a recursive function, or an argument of a recursive call. The
+  // write is the free call js.%put, and vector-ref is no stable bound, so the IR already refuses such
+  // a loop; the rules keep the field out of every place a bound is read. A string key reaching the
+  // field from a variable stays refused by the computed-access gate, since it could name constructor.
+  const fieldAssignment = (e: ts.BinaryExpression, target: ts.PropertyAccessExpression | ts.ElementAccessExpression): Datum => {
+    const refuse = (n: ts.Node, why: string): never => {
+      throw new Unsupported(n, `a field is assigned only ${why}`);
+    };
+    if (ts.isOptionalChain(target)) refuse(target, "without ?.");
+    const key = ts.isPropertyAccessExpression(target) ? target.name.text
+      : ts.isStringLiteral(target.argumentExpression) ? target.argumentExpression.text : refuse(target, "under a literal key");
+    if (IMPLICIT.has(key) || ARRAY_MEMBERS.has(key) || /^\d+$/.test(key)) {
+      refuse(target, `under a key other than ${key}, which JavaScript calls implicitly or the checker reads as an array member`);
+    }
+    if (!callFree(checker.getTypeAtLocation(e.right), e.right)) refuse(e.right, "a value whose type can hold no function");
+    assignable(e, skipParens(target.expression));
+    return count([sym("js.%put"), expr(target.expression), key, expr(e.right)]);
+  };
+  // Whether no value of type t can be or hold a function. A stored closure is one 0CFA would not see,
+  // and an object holding one could define a member JavaScript calls implicitly. A type that hides
+  // its values, unknown or object, could hold anything.
+  const HIDES = ts.TypeFlags.Any | ts.TypeFlags.Unknown | ts.TypeFlags.NonPrimitive | ts.TypeFlags.TypeParameter |
+    ts.TypeFlags.IndexedAccess | ts.TypeFlags.Conditional | ts.TypeFlags.Substitution;
+  const callFree = (t: ts.Type, at: ts.Node, seen = new Set<ts.Type>()): boolean => {
+    if (seen.has(t)) return true;
+    seen.add(t);
+    if (t.flags & HIDES) return false;
+    if (t.isUnionOrIntersection()) return t.types.every((u) => callFree(u, at, seen));
+    if (!(t.flags & ts.TypeFlags.Object)) return true;
+    if (t.getCallSignatures().length > 0 || t.getConstructSignatures().length > 0) return false;
+    if (checker.isArrayType(t) || checker.isTupleType(t)) {
+      return checker.getTypeArguments(t as ts.TypeReference).every((u) => callFree(u, at, seen));
+    }
+    return checker.getPropertiesOfType(t).every((p) => callFree(checker.getTypeOfSymbolAtLocation(p, at), at, seen)) &&
+      checker.getIndexInfosOfType(t).every((i) => callFree(i.type, at, seen));
+  };
+  const OBJECT_READERS = new Set(["keys", "entries", "values"]);
+  const recursive = (fn: ts.Node): boolean => {
+    const seen = new Set<ts.Node>();
+    const work = [...namedFunctions(fn)];
+    while (work.length > 0) {
+      const f = work.pop()!;
+      if (f === fn) return true;
+      if (seen.has(f)) continue;
+      seen.add(f);
+      work.push(...namedFunctions(f));
+    }
+    return false;
+  };
+  const assignable = (e: ts.BinaryExpression, receiver: ts.Expression): void => {
+    if (!ts.isExpressionStatement(e.parent)) throw new Unsupported(e, "a field is assigned only as a statement");
+    const target = ts.isIdentifier(receiver) ? checker.getSymbolAtLocation(receiver) : undefined;
+    const decl = target?.valueDeclaration;
+    if (
+      !target || !decl || !ts.isVariableDeclaration(decl) || !ts.isIdentifier(decl.name) ||
+      !(decl.parent.flags & ts.NodeFlags.Const) || !decl.initializer || !ts.isObjectLiteralExpression(skipParens(decl.initializer)) ||
+      (skipParens(decl.initializer) as ts.ObjectLiteralExpression).properties.some(ts.isSpreadAssignment)
+    ) {
+      throw new Unsupported(e, "a field is assigned only on a const bound to an object literal without spread");
+    }
+    const home = enclosingFunction(decl);
+    if (enclosingFunction(e) !== home) throw new Unsupported(e, "a field is assigned only in the function that declares the object");
+    const refs = (n: ts.Node): ts.Identifier[] =>
+      ts.isIdentifier(n) && n !== decl.name && symbolOf(n) === target ? [n] : n.getChildren(sf).flatMap(refs);
+    const fieldWrite = (p: ts.Node): boolean =>
+      ts.isBinaryExpression(p.parent) && p.parent.left === p && p.parent.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isExpressionStatement(p.parent.parent);
+    const assigning = (p: ts.Node): boolean =>
+      (ts.isBinaryExpression(p.parent) && p.parent.left === p &&
+        p.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && p.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment) ||
+      ((ts.isPostfixUnaryExpression(p.parent) || ts.isPrefixUnaryExpression(p.parent)) &&
+        (p.parent.operator === ts.SyntaxKind.PlusPlusToken || p.parent.operator === ts.SyntaxKind.MinusMinusToken));
+    const objectReader = (p: ts.Node, r: ts.Identifier): boolean =>
+      ts.isCallExpression(p) && p.arguments.length === 1 && p.arguments[0] === r && ts.isPropertyAccessExpression(p.expression) &&
+      ts.isIdentifier(p.expression.expression) && p.expression.expression.text === "Object" && isLibGlobal(p.expression.expression) &&
+      OBJECT_READERS.has(p.expression.name.text);
+    for (const r of refs(sf)) {
+      const p = r.parent;
+      const field =
+        (ts.isPropertyAccessExpression(p) || (ts.isElementAccessExpression(p) && ts.isStringLiteral(p.argumentExpression))) &&
+        p.expression === r && !(ts.isCallExpression(p.parent) && p.parent.expression === p) && (!assigning(p) || fieldWrite(p));
+      const ok = field || objectReader(p, r) || (ts.isReturnStatement(p) && p.expression === r && enclosingFunction(r) === home);
+      if (!ok) throw new Unsupported(r, "an object whose field is assigned may only be read by field, Object.keys/entries/values or return");
+      for (let n: ts.Node = r; n.parent; n = n.parent) {
+        const q = n.parent;
+        const inHeader =
+          ts.isForStatement(q) ? n === q.initializer || n === q.condition || n === q.incrementor :
+          ts.isWhileStatement(q) || ts.isDoStatement(q) ? n === q.expression :
+          ts.isForOfStatement(q) ? n === q.expression && !(objectReader(p, r) && skipParens(q.expression) === p) : false;
+        if (inHeader) throw new Unsupported(r, "a loop may not test or iterate an object whose field is assigned");
+        const inTest = (ts.isIfStatement(q) && n === q.expression) || (ts.isConditionalExpression(q) && n === q.condition);
+        const caller = inTest ? namedCaller(q) : undefined;
+        if (caller && recursive(caller)) throw new Unsupported(r, "a recursive function may not test an object whose field is assigned");
+        if (ts.isCallExpression(q) && q.arguments.includes(n as ts.Expression) && ts.isIdentifier(q.expression) && recursesBack(q.expression)) {
+          throw new Unsupported(r, "a recursive call may not pass an object whose field is assigned");
+        }
+      }
     }
   };
 

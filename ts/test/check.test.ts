@@ -1051,3 +1051,56 @@ test("a direct call may not pass a defaulted function more arguments than it dec
     function spin(n: number): number { const g = mk(0, 1, 2); return g(n); }
     console.log(spin(1));`, "unsupported-syntax");
 });
+
+// HC-33: assigning to a field of a local const object literal.
+const FIELD_ASSIGN = `
+  function tally(words: string[]): { a: number; other: number } {
+    const counts = { a: 0, other: 0 };
+    for (const w of words) {
+      if (w === "a") counts.a = counts.a + 1;
+      else counts["other"] = counts.other + 1;
+    }
+    return counts;
+  }
+  async function main(): Promise<string> {
+    const w = await getWeather({ city: "Sydney" });
+    const o = { hot: false, n: 0 };
+    o.hot = w.tempC > 25;
+    o.n = w.tempC;
+    for (const kv of Object.entries(tally(["a", "b", "a"]))) console.log(kv);
+    return \`\${o.hot} \${o.n}\`;
+  }
+  main();
+`;
+
+test("field assignment on a local const object literal is accepted", () => {
+  assertClean(FIELD_ASSIGN);
+});
+
+// A string key could reach constructor, so the computed-access gate still refuses it.
+test("a field assignment under a computed string key stays refused", () => {
+  assertRejected(`function f(k: string): Record<string, number> { const c: Record<string, number> = {}; c[k] = 1; return c; } f("a");`, "computed-access");
+});
+
+// A loop or recursion bounded by a field the body changes never ends, so neither may be accepted.
+test("a field the body assigns cannot bound a loop or a recursion", () => {
+  const loop = checkTypeScript(`
+    function f(): number { const o = { n: 1 }; for (let i = 0; i < o.n; i++) o.n = o.n + 1; return o.n; }
+    f();`, { toolDeclarations: TOOLS });
+  assert.notDeepEqual(loop.violations, []);
+  const rec = checkTypeScript(`
+    function f(): number {
+      const o = { n: 1 };
+      const go = (i: number): number => (i >= o.n ? i : go(i + 1));
+      o.n = 5;
+      return go(0);
+    }
+    function spin(i: number): number {
+      const o = { n: i + 1 };
+      if (i >= o.n) return i;
+      o.n = o.n + 1;
+      return spin(i + 1);
+    }
+    f(); spin(0);`, { toolDeclarations: TOOLS });
+  assert.notDeepEqual(rec.violations, []);
+});

@@ -635,3 +635,36 @@ test("rest parameters and destructured defaults stay unsupported", () => {
   unsupported("function f(...xs: number[]): number { return xs.length; } f(1);");
   unsupported("function f({ a }: { a: number } = { a: 1 }): number { return a; } f();");
 });
+
+// HC-33: a field of a local const object literal may be assigned, as a statement, under a literal
+// key. The write is the free call js.%put, so the analysis never reads the field as a stable value.
+test("assigning to a field of a local object lowers to js.%put", () => {
+  assert.equal(
+    lowered("function f(): number { const o = { n: 0 }; o.n = 1; return o.n; } f();"),
+    '(define (js.f) (letrec* ((js.o%1 (vector "n" 0))) (begin (js.%put js.o%1 "n" 1) (vector-ref js.o%1 "n")))) (js.f)',
+  );
+  assert.equal(
+    lowered('const o = { n: 0, s: "" }; o["s"] = "x"; console.log(o.s);'),
+    '(define js.o (vector "n" 0 "s" "")) (js.%put js.o "s" "x") (js.console.log (vector-ref js.o "s"))',
+  );
+});
+
+test("a field assignment is refused outside the pushable()-style alias rules", () => {
+  // Not a const bound to an object literal in the same function.
+  unsupported("function f(o: { n: number }): number { o.n = 1; return o.n; } f({ n: 0 });");
+  unsupported("function f(): number { let o = { n: 0 }; o.n = 1; return o.n; } f();");
+  unsupported("function f(): number { const o = { n: 0 }; const g = (): void => { o.n = 1; }; g(); return o.n; } f();");
+  unsupported("function f(): number { const o = { a: { n: 0 } }; o.a.n = 1; return o.a.n; } f();");
+  // Only as a statement, and only with =.
+  unsupported("function f(): number { const o = { n: 0 }; return (o.n = 1); } f();");
+  unsupported("function f(): number { const o = { n: 0 }; o.n += 1; return o.n; } f();");
+  // An alias the analysis cannot follow, a free call included.
+  unsupported('const o = { n: 0 }; o.n = 1; console.log(o);');
+  unsupported("function f(): number { const o = { n: 0 }; const p = o; o.n = 1; return p.n; } f();");
+  unsupported("function g(o: { n: number }): number { return o.n; } function f(): number { const o = { n: 0 }; o.n = 1; return g(o); } f();");
+  unsupported("function f(): { o: { n: number } } { const o = { n: 0 }; o.n = 1; return { o }; } f();");
+  // A stored function, or a value that could hold one.
+  unsupported("function f(): number { const o = { h: (): number => 0 }; o.h = (): number => 1; return 0; } f();");
+  unsupported("function f(): number { const o = { h: { g: (): number => 0 } }; o.h = { g: (): number => 1 }; return 0; } f();");
+  unsupported("function f(x: unknown): number { const o: { v: unknown } = { v: 0 }; o.v = x; return 0; } f(1);");
+});

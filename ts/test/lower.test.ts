@@ -527,3 +527,52 @@ test("typeof lowers to a free call, and its comparison through the === path", ()
     '(define js.f (lambda (js.d) (and (eqv? (js.%typeof js.d) "object") (not (eqv? js.d js.null)))))',
   );
 });
+
+// HC-31: an optional chain binds its receiver to a temporary, and the read runs only when that is not
+// nullish. The rest of the chain sits inside the guard, because `a?.b.c` skips `.c` too.
+test("an optional property read lowers to a nullish-guarded temporary", () => {
+  assert.equal(
+    lowered("const f = (o: { b: number } | undefined): number => o?.b ?? 0;"),
+    '(define js.f (lambda (js.o) (or (letrec* ((%js.tmp1 js.o)) (if (js.%nullish %js.tmp1) (void) (vector-ref %js.tmp1 "b"))) 0)))',
+  );
+});
+
+test("an optional element read and length read the receiver through its non-nullable type", () => {
+  assert.equal(
+    lowered("const g = (xs: number[] | null): number => (xs?.[0] ?? 0) + (xs?.length ?? 0);"),
+    "(define js.g (lambda (js.xs) (js.%+ (or (letrec* ((%js.tmp1 js.xs)) (if (js.%nullish %js.tmp1) (void) (js.%index %js.tmp1 0))) 0) " +
+      "(or (letrec* ((%js.tmp2 js.xs)) (if (js.%nullish %js.tmp2) (void) (length %js.tmp2))) 0))))",
+  );
+  assert.equal(
+    lowered('const h = (o: { k: string } | undefined): string | undefined => o?.["k"];'),
+    '(define js.h (lambda (js.o) (letrec* ((%js.tmp1 js.o)) (if (js.%nullish %js.tmp1) (void) (vector-ref %js.tmp1 "k")))))',
+  );
+});
+
+test("the rest of an optional chain is read inside its guard", () => {
+  assert.equal(
+    lowered("const f = (o: { a: { c: number } } | undefined): number | undefined => o?.a.c;"),
+    '(define js.f (lambda (js.o) (letrec* ((%js.tmp1 js.o)) (if (js.%nullish %js.tmp1) (void) (vector-ref (vector-ref %js.tmp1 "a") "c")))))',
+  );
+  assert.equal(
+    lowered("const g = (o: { a?: { c: number } } | undefined): number | undefined => o?.a?.c;"),
+    "(define js.g (lambda (js.o) (letrec* ((%js.tmp1 js.o)) (if (js.%nullish %js.tmp1) (void) " +
+      '(letrec* ((%js.tmp2 (vector-ref %js.tmp1 "a"))) (if (js.%nullish %js.tmp2) (void) (vector-ref %js.tmp2 "c")))))))',
+  );
+});
+
+test("an optional chain's element key is evaluated only inside the guard", () => {
+  assert.equal(
+    lowered("const f = (xs: number[] | undefined, n: number): number | undefined => xs?.[n - 1];"),
+    "(define js.f (lambda (js.xs js.n) (letrec* ((%js.tmp1 js.xs)) (if (js.%nullish %js.tmp1) (void) (js.%index %js.tmp1 (- js.n 1))))))",
+  );
+});
+
+test("a call inside an optional chain is not lowered", () => {
+  unsupported("const f = (g: (() => number) | undefined): number | undefined => g?.();");
+  unsupported("const f = (o: { m: () => number }): number | undefined => o.m?.();");
+  unsupported("const f = (o: { m: () => number } | undefined): number | undefined => o?.m();");
+  unsupported("const f = (o: { s: string } | undefined): string | undefined => o?.s.toUpperCase();");
+  unsupported("const g = (xs: number[] | undefined): number[] | undefined => xs?.map((x: number) => x + 1);");
+  unsupported("const h = (o: { xs: number[] } | undefined): number[] | undefined => o?.xs.slice(1);");
+});

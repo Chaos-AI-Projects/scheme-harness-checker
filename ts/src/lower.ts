@@ -176,12 +176,18 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
   };
   const withBindings = (bindings: Datum[][], body: Datum): Datum => (bindings.length > 0 ? count([S.letrec, bindings, body]) : body);
 
-  const isArray = (e: ts.Expression): boolean => {
+  // In an optional chain the receiver's type admits null or undefined, which the guard has ruled out
+  // by the time the member is read, so the member is judged on the type without them (HC-31).
+  const typeOf = (e: ts.Node, nonNullable = false): ts.Type => {
     const t = checker.getTypeAtLocation(e);
+    return nonNullable ? checker.getNonNullableType(t) : t;
+  };
+  const isArray = (e: ts.Expression, nonNullable = false): boolean => {
+    const t = typeOf(e, nonNullable);
     return checker.isArrayType(t) || checker.isTupleType(t);
   };
-  const isRecord = (e: ts.Node): boolean => {
-    const t = checker.getTypeAtLocation(e);
+  const isRecord = (e: ts.Node, nonNullable = false): boolean => {
+    const t = typeOf(e, nonNullable);
     return (t.flags & ts.TypeFlags.Object) !== 0 && !checker.isArrayType(t) && !checker.isTupleType(t) && t.getCallSignatures().length === 0;
   };
   const isArrayNode = (e: ts.Node): boolean => {
@@ -522,20 +528,16 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
         throw new Unsupported(p, "only plain `key: value` and shorthand properties are lowered yet");
       })]);
     }
-    if (ts.isPropertyAccessExpression(e) && !e.questionDotToken) {
-      if (isArray(e.expression) && e.name.text === "length") return count([sym("length"), expr(e.expression)]);
-      if (isRecord(e.expression)) return count([sym("vector-ref"), expr(e.expression), e.name.text]);
-      const t = checker.getTypeAtLocation(e.expression);
-      if (e.name.text === "length" && (t.flags & ts.TypeFlags.StringLike) !== 0) return count([sym("string-length"), expr(e.expression)]);
+    if ((ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) && ts.isOptionalChain(e)) return optionalChain(e, (d) => d);
+    if (ts.isPropertyAccessExpression(e) || ts.isElementAccessExpression(e)) {
+      const read = member(e, () => expr(e.expression), false);
+      if (read) return read;
     }
-    if (ts.isElementAccessExpression(e) && !e.questionDotToken && isRecord(e.expression) && ts.isStringLiteral(e.argumentExpression)) {
-      return count([sym("vector-ref"), expr(e.expression), e.argumentExpression.text]);
-    }
-    // Not car or list-ref, whatever the type says. An optional property, an index signature, {} or
-    // a narrowing kept across a call lets a string pass as an array, and "a"[0] is "a", a fixed point
-    // that size-change would read as a decrease. The free call's arguments escape.
-    if (ts.isElementAccessExpression(e) && !e.questionDotToken && isArray(e.expression)) {
-      return count([sym("js.%index"), expr(e.expression), expr(e.argumentExpression)]);
+    // A call in an optional chain would have to run only when the receiver is not nullish, and a
+    // method's lowering judges its receiver by a type that still admits undefined. `g?.()` on a
+    // plain name is refused too: it would lower to an unconditional call.
+    if (ts.isCallExpression(e) && ts.isOptionalChain(e)) {
+      throw new Unsupported(e, "a call inside an optional chain is not lowered");
     }
     if (
       ts.isCallExpression(e) && ts.isPropertyAccessExpression(e.expression) && !e.expression.questionDotToken &&
@@ -570,6 +572,47 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       return call(name(e.expression), [], e.arguments, recursesBack(e.expression));
     }
     throw new Unsupported(e, `${ts.SyntaxKind[e.kind]} is not lowered yet`);
+  };
+
+  // A member read on a receiver already lowered by `receiver`, or undefined when the lowering has no
+  // form for it. nonNullable judges the receiver as the guard of an optional chain leaves it.
+  const member = (e: ts.PropertyAccessExpression | ts.ElementAccessExpression, receiver: () => Datum, nonNullable: boolean): Datum | undefined => {
+    const r = e.expression;
+    if (ts.isPropertyAccessExpression(e)) {
+      if (isArray(r, nonNullable) && e.name.text === "length") return count([sym("length"), receiver()]);
+      if (isRecord(r, nonNullable)) return count([sym("vector-ref"), receiver(), e.name.text]);
+      if (e.name.text === "length" && (typeOf(r, nonNullable).flags & ts.TypeFlags.StringLike) !== 0) return count([sym("string-length"), receiver()]);
+      return undefined;
+    }
+    if (isRecord(r, nonNullable) && ts.isStringLiteral(e.argumentExpression)) return count([sym("vector-ref"), receiver(), e.argumentExpression.text]);
+    // Not car or list-ref, whatever the type says. An optional property, an index signature, {} or
+    // a narrowing kept across a call lets a string pass as an array, and "a"[0] is "a", a fixed point
+    // that size-change would read as a decrease. The free call's arguments escape.
+    if (isArray(r, nonNullable)) return count([sym("js.%index"), receiver(), expr(e.argumentExpression)]);
+    return undefined;
+  };
+
+  // An optional chain, in continuation-passing style: k builds the rest of the chain around the value
+  // of e. At a `?.` the receiver is bound to a temporary and everything after it, the rest of the
+  // chain included, runs only when the temporary is not nullish, as `a?.b.c` skips `.c` too. A
+  // parenthesis ends the chain, so `(a?.b).c` reads `.c` on the result like any other read.
+  const optionalChain = (e: ts.PropertyAccessExpression | ts.ElementAccessExpression, k: (d: Datum) => Datum): Datum => {
+    const r = e.expression;
+    const inChain = (ts.isPropertyAccessExpression(r) || ts.isElementAccessExpression(r)) && ts.isOptionalChain(r);
+    const readOn = (receiver: Datum): Datum => {
+      const read = member(e, () => receiver, true);
+      if (!read) throw new Unsupported(e, `${ts.SyntaxKind[e.kind]} is not lowered yet`);
+      return k(read);
+    };
+    if (!e.questionDotToken) {
+      if (!inChain) throw new Unsupported(e, `${ts.SyntaxKind[e.kind]} is not lowered yet`);
+      return optionalChain(r, readOn);
+    }
+    const guarded = (receiver: Datum): Datum => {
+      const t = sym(`%js.tmp${++temps}`);
+      return count([S.letrec, [[t, receiver]], count([S.if, count([sym("js.%nullish"), t]), count([S.void]), readOn(t)])]);
+    };
+    return inChain ? optionalChain(r, guarded) : guarded(expr(r));
   };
 
   // A growing array breaks a loop bounded by its length, which assumes the length holds still. So

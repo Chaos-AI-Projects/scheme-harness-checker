@@ -951,3 +951,50 @@ test("an interface method signature is rejected, its parameters are bivariant", 
     f(["a"], 0);
   `, "unsupported-syntax");
 });
+
+// HC-31: optional chaining on property and element reads, through a nullish-guarded temporary.
+const OPTIONAL_CHAIN = `
+  type Hit = { title: string; meta?: { score: number; tags: string[] } };
+  async function main(): Promise<number> {
+    const hits: Hit[] = [{ title: "a", meta: { score: 2, tags: ["x"] } }, { title: "b" }];
+    let total = 0;
+    for (const h of hits) {
+      total += h.meta?.score ?? 0;
+      const first = h.meta?.tags[0] ?? "none";
+      console.log(first, h.meta?.tags.length ?? 0, h.meta?.["score"]);
+    }
+    const w: { tempC: number } | undefined = await getWeather({ city: "Sydney" });
+    return total + (w?.tempC ?? 0);
+  }
+  main();
+`;
+
+test("optional property and element reads are accepted", () => {
+  assertClean(OPTIONAL_CHAIN);
+});
+
+test("a recursive call inside an optional element key is still analysed", () => {
+  const loop = checkTypeScript(`function g(xs: number[] | undefined): number { return xs?.[g(xs) - 1] ?? 0; } g([1]);`,
+    { toolDeclarations: TOOLS });
+  assert.deepEqual(loop.violations.map((v) => v.kind), ["no-decreasing-arg"]);
+});
+
+// The positive control matters: without it the rejection below could come from the safe-integer
+// rule rather than from the optional read.
+test("an optional read does not count as a decrease", () => {
+  const shape = (m: string) => `type L = { n: number; next?: L };
+    function f(l: L | undefined, n: number): number {
+      if (!Number.isSafeInteger(n)) return 0;
+      if (n <= 0) return 0;
+      const m = ${m};
+      return f(l, m);
+    }
+    f(undefined, 3);`;
+  assertClean(shape("n - 1"));
+  assertRejected(shape("l?.n ?? n - 1"), "no-decreasing-arg");
+});
+
+test("an optional chain opens no escape: computed keys and banned members stay banned", () => {
+  assertRejected(`const o: { [k: string]: number } | undefined = { a: 1 }; const k = "a"; console.log(o?.[k]);`, "computed-access");
+  assertRejected(`const o: { a: number } | undefined = { a: 1 }; console.log(o?.constructor);`, "forbidden-member");
+});

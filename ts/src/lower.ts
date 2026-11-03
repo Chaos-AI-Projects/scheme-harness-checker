@@ -162,8 +162,15 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
   // A destructuring parameter becomes a temporary, and its bindings open the body as a letrec*.
   const params = (fn: ts.SignatureDeclaration): { formals: Datum[]; bindings: Datum[][] } => {
     const bindings: Datum[][] = [];
+    if (fn.parameters.some(omittable)) calledOnlyDirectly(fn);
     const formals = fn.parameters.map((p) => {
-      if (p.initializer || p.dotDotDotToken || p.questionToken) throw new Unsupported(p, "default, optional and rest parameters are not lowered yet");
+      if (p.dotDotDotToken) throw new Unsupported(p, "rest parameters are not lowered yet");
+      if (omittable(p)) {
+        if (!ts.isIdentifier(p.name)) throw new Unsupported(p, "a destructuring parameter may not be optional or have a default");
+        if (p.initializer && !literalDefault(p.initializer)) {
+          throw new Unsupported(p.initializer, "a default must be a number, string, boolean or null literal");
+        }
+      }
       if (ts.isIdentifier(p.name)) return name(p.name);
       if (ts.isObjectBindingPattern(p.name) ? !isRecord(p.name) : !isArrayNode(p.name)) {
         throw new Unsupported(p.name, "a destructuring pattern must match an object or array type");
@@ -175,6 +182,76 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     return { formals, bindings };
   };
   const withBindings = (bindings: Datum[][], body: Datum): Datum => (bindings.length > 0 ? count([S.letrec, bindings, body]) : body);
+
+  // HC-32: a call may omit an optional or defaulted argument, and the analysis drops a call whose
+  // arity cannot match its lambda. So a direct call fills each omitted argument in, and a function
+  // with such a parameter may be named only as the callee of one. An alias, a callback or a field
+  // would call it with too few arguments where the IR cannot see the call.
+  const omittable = (p: ts.ParameterDeclaration): boolean => !!p.initializer || !!p.questionToken;
+  const literalDefault = (init: ts.Expression): boolean => {
+    const e = skipParens(init);
+    if (ts.isPrefixUnaryExpression(e)) return e.operator === ts.SyntaxKind.MinusToken && ts.isNumericLiteral(e.operand);
+    return ts.isNumericLiteral(e) || ts.isStringLiteral(e) || ts.isNoSubstitutionTemplateLiteral(e) ||
+      e.kind === ts.SyntaxKind.TrueKeyword || e.kind === ts.SyntaxKind.FalseKeyword || e.kind === ts.SyntaxKind.NullKeyword;
+  };
+  // The name a function is bound to when its definition is fixed: a function declaration, or an arrow
+  // that is the whole initializer of a const.
+  const fixedName = (fn: ts.SignatureDeclaration): ts.Identifier | undefined => {
+    if (ts.isFunctionDeclaration(fn)) return fn.name;
+    let n: ts.Node = fn;
+    while (ts.isParenthesizedExpression(n.parent)) n = n.parent;
+    const d = n.parent;
+    if (!ts.isArrowFunction(fn) || !ts.isVariableDeclaration(d) || d.initializer !== n || !ts.isIdentifier(d.name)) return undefined;
+    return ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const ? d.name : undefined;
+  };
+  const calledOnlyDirectly = (fn: ts.SignatureDeclaration): void => {
+    const id = fixedName(fn);
+    const target = id && checker.getSymbolAtLocation(id);
+    if (!id || !target) throw new Unsupported(fn, "a function with an optional or default parameter must be a function declaration or a const arrow");
+    const visit = (n: ts.Node): void => {
+      if (ts.isIdentifier(n) && n !== id && symbolOf(n) === target) {
+        const p = n.parent;
+        if (!ts.isCallExpression(p) || p.expression !== n || p.questionDotToken) {
+          throw new Unsupported(n, `${id.text} has an optional or default parameter, so it may only be called directly by name`);
+        }
+      }
+      n.getChildren(sf).forEach(visit);
+    };
+    visit(sf);
+  };
+  // The parameters of the program function a direct call names, when its definition is fixed. A
+  // tool is a free name, so it needs no filling.
+  const fixedParameters = (callee: ts.Identifier): readonly ts.ParameterDeclaration[] | undefined => {
+    const decls = checker.getSymbolAtLocation(callee)?.declarations ?? [];
+    const d = decls.length === 1 ? decls[0]! : undefined;
+    if (!d || d.getSourceFile() !== sf) return undefined;
+    if (ts.isFunctionDeclaration(d)) return d.parameters;
+    if (ts.isVariableDeclaration(d) && d.initializer && (ts.getCombinedNodeFlags(d) & ts.NodeFlags.Const)) {
+      const f = skipParens(d.initializer);
+      if (ts.isArrowFunction(f)) return f.parameters;
+    }
+    return undefined;
+  };
+  // A passed undefined becomes the default at run time, which the IR would not see.
+  // A passed null stays null. A type parameter or other deferred type may be instantiated with
+  // undefined, so it counts as admitting it.
+  const MAY_BE_UNDEFINED = ts.TypeFlags.Undefined | ts.TypeFlags.Void | ts.TypeFlags.Unknown | ts.TypeFlags.Any |
+    ts.TypeFlags.TypeParameter | ts.TypeFlags.IndexedAccess | ts.TypeFlags.Conditional | ts.TypeFlags.Substitution;
+  const admitsUndefined = (t: ts.Type): boolean => (t.isUnion() ? t.types.some(admitsUndefined) : (t.flags & MAY_BE_UNDEFINED) !== 0);
+  const filled = (callee: ts.Identifier, args: readonly ts.Expression[]): Datum[] => {
+    const ps = fixedParameters(callee);
+    if (!ps || !ps.some(omittable)) return [];
+    if (args.some(ts.isSpreadElement)) throw new Unsupported(callee, `${callee.text} has an optional or default parameter, so a call to it may not spread`);
+    // A const's annotation can declare more parameters than its arrow.
+    if (args.length > ps.length) throw new Unsupported(callee, `${callee.text} declares ${ps.length} parameters, so a call may not pass more`);
+    ps.forEach((p, k) => {
+      const a = args[k];
+      if (a && p.initializer && admitsUndefined(checker.getTypeAtLocation(a))) {
+        throw new Unsupported(a, "an argument at a defaulted position may not admit undefined, since the default would replace it");
+      }
+    });
+    return ps.slice(args.length).map((p) => (p.initializer ? expr(p.initializer) : count([S.void])));
+  };
 
   // In an optional chain the receiver's type admits null or undefined, which the guard has ruled out
   // by the time the member is read, so the member is judged on the type without them (HC-31).
@@ -569,7 +646,10 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
       }
     }
     if (ts.isCallExpression(e) && ts.isIdentifier(e.expression)) {
-      return call(name(e.expression), [], e.arguments, recursesBack(e.expression));
+      const omitted = filled(e.expression, e.arguments);
+      const c = call(name(e.expression), [], e.arguments, recursesBack(e.expression));
+      if (omitted.length > 0) (c as Datum[]).push(...omitted);
+      return c;
     }
     throw new Unsupported(e, `${ts.SyntaxKind[e.kind]} is not lowered yet`);
   };
@@ -623,6 +703,12 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     for (let p = n.parent; p; p = p.parent) if (ts.isFunctionLike(p)) return p;
     return undefined;
   };
+  // On the name of a shorthand property the checker answers with the property, so `{ a }` asks for
+  // the variable it reads.
+  const symbolOf = (id: ts.Identifier): ts.Symbol | undefined =>
+    ts.isShorthandPropertyAssignment(id.parent) && id.parent.name === id
+      ? checker.getShorthandAssignmentValueSymbol(id.parent)
+      : checker.getSymbolAtLocation(id);
   const pushable = (call: ts.CallExpression, receiver: ts.Expression): void => {
     const refuse = (why: string): never => {
       throw new Unsupported(call, `push is lowered only ${why}`);
@@ -638,12 +724,6 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     }
     const home = enclosingFunction(decl);
     if (enclosingFunction(call) !== home) refuse("in the function that declares the array");
-    // On the name of a shorthand property the checker answers with the property, so `{ a }` asks for
-    // the variable it reads.
-    const symbolOf = (id: ts.Identifier): ts.Symbol | undefined =>
-      ts.isShorthandPropertyAssignment(id.parent) && id.parent.name === id
-        ? checker.getShorthandAssignmentValueSymbol(id.parent)
-        : checker.getSymbolAtLocation(id);
     const refs = (n: ts.Node): ts.Identifier[] =>
       ts.isIdentifier(n) && n !== decl.name && symbolOf(n) === target ? [n] : n.getChildren(sf).flatMap(refs);
     for (const r of refs(sf)) {

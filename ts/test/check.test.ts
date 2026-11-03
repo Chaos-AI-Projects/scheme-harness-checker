@@ -998,3 +998,56 @@ test("an optional chain opens no escape: computed keys and banned members stay b
   assertRejected(`const o: { [k: string]: number } | undefined = { a: 1 }; const k = "a"; console.log(o?.[k]);`, "computed-access");
   assertRejected(`const o: { a: number } | undefined = { a: 1 }; console.log(o?.constructor);`, "forbidden-member");
 });
+
+// HC-32: optional and literal-default parameters, filled in at each direct call.
+const DEFAULT_PARAMS = `
+  function sum(n: number, acc = 0, label?: string): number {
+    if (!Number.isSafeInteger(n)) return acc;
+    if (n <= 0) return acc;
+    return sum(n - 1, acc + n, label);
+  }
+  const fmt = (n: number, unit = "C", round = true): string => \`\${round ? Math.round(n) : n}\${unit}\`;
+  async function main(): Promise<string> {
+    const w = await getWeather({ city: "Sydney" });
+    console.log(sum(4), sum(3, 10, "x"));
+    return fmt(w.tempC) + fmt(w.tempC, "F", false);
+  }
+  main();
+`;
+
+test("optional and literal-default parameters are accepted", () => {
+  assertClean(DEFAULT_PARAMS);
+});
+
+test("a filled-in default keeps the descent size-change reads", () => {
+  const loop = checkTypeScript(`function f(n: number, acc = 0): number { if (n <= 0) return acc; return f(n, acc + 1); } f(3);`,
+    { toolDeclarations: TOOLS });
+  assert.deepEqual(loop.violations.map((v) => v.kind), ["no-decreasing-arg"]);
+});
+
+// The analysis drops a call whose arity cannot match its lambda, so an alias or a callback that
+// passes too few arguments would hide the recursion. Each program here never terminates.
+test("a defaulted function cannot recurse through a call that omits its argument", () => {
+  assertRejected(`function spin(n: number, d = 0): number { const h = spin; return h(n); } spin(1);`, "unsupported-syntax");
+  assertRejected(`
+    function ap(g: (n: number) => number): number { return g(1); }
+    function spin(n: number, d = 0): number { return ap(spin); }
+    spin(1);
+  `, "unsupported-syntax");
+  assertRejected(`function spin(n: number, d?: number): number { return [n].map(spin)[0] ?? 0; } spin(1);`, "unsupported-syntax");
+});
+
+// HC-32 review: a const's annotation can declare more parameters than its arrow, so a direct call
+// can pass too many, and the analysis drops that call as it drops one that passes too few.
+test("a direct call may not pass a defaulted function more arguments than it declares", () => {
+  const mk = (call: string) => `
+    const mk: (d?: number, e?: number) => (n: number) => number = (d = 0): ((n: number) => number) => spin;
+    function spin(n: number): number { const g = ${call}; return g(n); }
+    console.log(spin(1));`;
+  assertRejected(mk("mk()"), "no-decreasing-arg");
+  assertRejected(mk("mk(0, 1)"), "unsupported-syntax");
+  assertRejected(`
+    const mk: (...xs: number[]) => (n: number) => number = (d = 0): ((n: number) => number) => spin;
+    function spin(n: number): number { const g = mk(0, 1, 2); return g(n); }
+    console.log(spin(1));`, "unsupported-syntax");
+});

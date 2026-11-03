@@ -576,3 +576,62 @@ test("a call inside an optional chain is not lowered", () => {
   unsupported("const g = (xs: number[] | undefined): number[] | undefined => xs?.map((x: number) => x + 1);");
   unsupported("const h = (o: { xs: number[] } | undefined): number[] | undefined => o?.xs.slice(1);");
 });
+
+// HC-32: a direct call that omits an argument gets the parameter's literal default, or (void) for a
+// bare `x?:`, so every direct call to it passes every formal. A call with too few arguments is one the
+// analysis drops as an arity error, so it must never reach the IR.
+test("a direct call fills an omitted default or optional argument at the call site", () => {
+  assert.equal(
+    lowered("function go(n: number, acc = 0): number { if (n <= 0) return acc; return go(n - 1, acc + n); } go(3);"),
+    "(define (js.go js.n js.acc) (if (<= js.n 0) js.acc (js.go (- js.n 1) (js.%+ js.acc js.n)))) (js.go 3 0)",
+  );
+  assert.equal(
+    lowered("function f(a: number, b?: number): number { return b ?? a; } f(1); f(1, 2);"),
+    "(define (js.f js.a js.b) (or js.b js.a)) (js.f 1 (void)) (js.f 1 2)",
+  );
+  assert.equal(
+    lowered('const j = (s: string, sep = ",", up = false, z: string | null = null, k = -1): string => s + sep; j("a"); j("a", ";", true);'),
+    '(define js.j (lambda (js.s js.sep js.up js.z js.k) (js.%+ js.s js.sep))) (js.j "a" "," #f js.null (- 1)) (js.j "a" ";" #t js.null (- 1))',
+  );
+});
+
+test("a default must be a literal", () => {
+  unsupported("function f(n: number, m = n): number { return m; } f(1);");
+  unsupported("function f(xs: number[], n = xs.length): number { return n; } f([1]);");
+  unsupported("function f(o = { a: 1 }): number { return o.a; } f();");
+});
+
+test("an argument at a defaulted position may not admit undefined", () => {
+  unsupported("function f(a = 0): number { return a; } function g(x?: number): number { return f(x); } g(1);");
+  unsupported("function f(a = 0): number { return a; } function g(x: number | undefined): number { return f(x); } g(1);");
+  unsupported("function f(a = 0): number { return a; } function g(x: unknown): number { return typeof x === \"number\" ? f(1) : f(undefined); } g(1);");
+  // An optional position without a default takes undefined as it is.
+  assert.equal(
+    lowered("function f(a?: number): number { return a ?? 0; } function g(x?: number): number { return f(x); } g(1);"),
+    "(define (js.f js.a) (or js.a 0)) (define (js.g js.x) (js.f js.x)) (js.g 1)",
+  );
+});
+
+test("a function with a default or optional parameter is named only as the callee of a direct call", () => {
+  unsupported("function f(x: number, i = 0): number { return x + i; } [1].map(f);");
+  unsupported("function f(x: number, i?: number): number { return x; } const h = f; h(1);");
+  unsupported("function f(x: number, i = 0): number { return x; } const o = { f }; console.log(o);");
+  unsupported("function ap(g: (n: number) => number): number { return g(1); } function f(x: number, i = 0): number { return x; } ap(f);");
+  unsupported("const f = (x: number, i = 0): number => x; console.log((f)(1));");
+  unsupported("let f = (x: number, i = 0): number => x; f(1);");
+  unsupported("[1, 2].map((x: number, i = 0) => x + i);");
+  unsupported("function f(x: number, i = 0): number { return x; } const xs: [number] = [1]; f(...xs);");
+});
+
+test("a tool's optional parameter is not filled in, since a tool is a free name", () => {
+  const { ir, violations } = lowerTypeScript("fetchPage(1);", {
+    toolDeclarations: "declare function fetchPage(n: number, page?: number): Promise<number>;",
+  });
+  assert.deepEqual(violations, []);
+  assert.equal(ir.map(write).join(" "), "(js.fetchPage 1)");
+});
+
+test("rest parameters and destructured defaults stay unsupported", () => {
+  unsupported("function f(...xs: number[]): number { return xs.length; } f(1);");
+  unsupported("function f({ a }: { a: number } = { a: 1 }): number { return a; } f();");
+});

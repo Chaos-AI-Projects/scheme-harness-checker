@@ -248,7 +248,17 @@ const bind = (env: Env | null, name: Datum, key: string): Env => ({ name, key, n
 
 const SPREAD_DEPTH_LIMIT = 8;
 
-export function cfaAnalyze(exprs: readonly Datum[]): CfaResult {
+/**
+ * calls "js" models a JavaScript call: a formal the call does not reach is bound to undefined, which
+ * is never a procedure, and an argument past the last formal is evaluated and ignored. "scheme", the
+ * default, treats a call whose arity cannot match as impossible, since Chez raises on it (HC-37).
+ */
+export interface CfaOptions {
+  readonly calls?: "scheme" | "js";
+}
+
+export function cfaAnalyze(exprs: readonly Datum[], options: CfaOptions = {}): CfaResult {
+  const jsCalls = options.calls === "js";
   const store = new Map<string, Value[]>();
   const lambdaTable = new Map<Datum, CfaLambda>();
   const lambdas: CfaLambda[] = [];
@@ -379,10 +389,11 @@ export function cfaAnalyze(exprs: readonly Datum[]): CfaResult {
 
   // Flow arguments into a lambda. `spread` (or null) flows to every formal and into the rest list,
   // for apply and HOF callbacks. Returns null when the arity cannot match, else the lambda's result.
+  // A JavaScript call always matches: a missing argument flows nothing and an extra one is dropped.
   function flowInto(label: number, args: readonly Value[][], spread: readonly Value[] | null): Value[] | null {
     const l = lambdas[label]!;
     const n = args.length;
-    if (spread === null && (n < l.formals.length || (l.rest === null && n > l.formals.length))) return null;
+    if (!jsCalls && spread === null && (n < l.formals.length || (l.rest === null && n > l.formals.length))) return null;
     for (let i = 0; i < l.formals.length; i++) {
       storeAdd(formalKey(label, i), setUnion(args[i] ?? [], spread ?? []));
     }

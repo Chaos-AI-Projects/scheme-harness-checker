@@ -1083,6 +1083,31 @@ test("a direct call may not pass a defaulted function more arguments than it dec
     console.log(spin(1));`, "unsupported-syntax");
 });
 
+// HC-37: a function type lets a call pass more or fewer arguments than the lambda that reaches it
+// declares, and JavaScript makes that call. The analysis must follow it rather than drop it as a
+// Scheme arity error. Each program here never terminates.
+test("a call through a function type follows a lambda whose arity it does not match", () => {
+  assertRejected(`
+    function ap(g: (a: number, b: number) => number): number { return g(1, 2); }
+    function spin(n: number): number { return ap(spin); }
+    spin(1);`, "no-decreasing-arg");
+  assertRejected(`function spin(n: number): number { const h: (a: number, b: number) => number = spin; return h(n, 0); } spin(1);`,
+    "no-decreasing-arg");
+  assertRejected(`function spin(n: number): number { const h: (...xs: number[]) => number = spin; return h(n, 0); } spin(1);`,
+    "no-decreasing-arg");
+  assertRejected(`function spin(n: number, d: unknown): number { const h: (n: number, d?: number) => number = spin; return h(n); } spin(1, 0);`,
+    "no-decreasing-arg");
+});
+
+test("a call through a function type with a mismatched arity is accepted when nothing recurses", () => {
+  assertClean(`
+    function one(n: number): number { return n; }
+    function two(n: number, d: unknown): number { return n; }
+    const h: (a: number, b: number) => number = one;
+    const k: (a: number, b?: number) => number = two;
+    console.log(h(1, 2) + k(1));`);
+});
+
 // HC-33: assigning to a field of a local const object literal.
 const FIELD_ASSIGN = `
   function tally(words: string[]): { a: number; other: number } {

@@ -25,9 +25,13 @@ const QUOTE = sym("quote");
 /**
  * numbers "double" judges numeric measures as JavaScript doubles: a loop or recursion counts only
  * over proven safe integers (HC-21). "exact", the default, is Scheme's and matches Chez.
+ *
+ * calls "js" follows a call whose argument count does not match the lambda that reaches it, as
+ * JavaScript makes that call (HC-37). "scheme", the default, drops it as the arity error Chez raises.
  */
 export interface TerminationOptions {
   readonly numbers?: "exact" | "double";
+  readonly calls?: "scheme" | "js";
 }
 
 /**
@@ -64,8 +68,8 @@ export function checkTermination(
   return [
     ...duplicateTopLevelDefinitions(exprs),
     ...(options.numbers === "double"
-      ? withDoubles(renamed, () => checkTerminationRenamed(renamed, maxDefinitions))
-      : checkTerminationRenamed(renamed, maxDefinitions)
+      ? withDoubles(renamed, () => checkTerminationRenamed(renamed, maxDefinitions, options))
+      : checkTerminationRenamed(renamed, maxDefinitions, options)
     ).map((v) => restoreTopLevelNames(v, topEnv)),
   ];
 }
@@ -197,7 +201,11 @@ export function restoreTopLevelNames(v: TerminationViolation, topEnv: RenameEnv)
 }
 
 /** termination.ss:3332 check-termination-renamed: Phases 2b to 7 on the renamed program. */
-function checkTerminationRenamed(exprs: readonly Datum[], maxDefinitions: number | null): TerminationViolation[] {
+function checkTerminationRenamed(
+  exprs: readonly Datum[],
+  maxDefinitions: number | null,
+  options: TerminationOptions,
+): TerminationViolation[] {
   const doViolations = analyzeDoForms(exprs);
   const namedLetViolations = analyzeNamedLetForms(exprs);
   const defs = extractDefinitions(exprs);
@@ -215,7 +223,7 @@ function checkTerminationRenamed(exprs: readonly Datum[], maxDefinitions: number
   }
   const definedNames = defs.map(([name]) => name);
   // Phases 5 and 6 run on the program with 0CFA's higher-order call edges made explicit.
-  const cfa = cfaAnalyzeProgram(exprs);
+  const cfa = cfaAnalyzeProgram(exprs, { calls: options.calls });
   const graph = buildCallGraph(cfa.rewritten);
   const baseViolations = [
     ...analyzeDirectRecursion(cfa.rewritten),

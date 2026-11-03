@@ -11,7 +11,7 @@
 
 import { car, Dotted, elements, equal, isList, isPair, isSym, sym, type Datum, type Sym } from "../sexp.ts";
 import { tarjanScc } from "./callgraph.ts";
-import { cfaAnalyze, cfaLambdaRef, type CfaLambda, type CfaResult, type CfaSite, type Callee, type Via } from "./cfa.ts";
+import { cfaAnalyze, cfaLambdaRef, type CfaLambda, type CfaOptions, type CfaResult, type CfaSite, type Callee, type Via } from "./cfa.ts";
 import { bodyBinders, exprReferencesAny, guardsAt, namesShadowedAt } from "./guards.ts";
 import { acyclic } from "./mutualrec.ts";
 import { hasBaseCaseBy } from "./namedlet.ts";
@@ -115,8 +115,8 @@ export function cfaRewriteProgram(exprs: readonly Datum[]): readonly Datum[] {
  * (unresolved-call), cycles made only of anonymous lambdas, which have no definition to carry a call
  * edge, and calls into a named let other than by its name.
  */
-export function cfaAnalyzeProgram(exprs: readonly Datum[]): CfaProgramAnalysis {
-  const result: CfaResult = cfaAnalyze(exprs);
+export function cfaAnalyzeProgram(exprs: readonly Datum[], options: CfaOptions = {}): CfaProgramAnalysis {
+  const result: CfaResult = cfaAnalyze(exprs, options);
   const siteSynth = new Map<Datum, Datum[][]>();
   const wrap = new Map<Datum, Sym>();
 

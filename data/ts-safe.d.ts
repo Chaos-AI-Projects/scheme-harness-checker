@@ -68,6 +68,7 @@ interface String {
   padEnd(maxLength: number, fillString?: string): string;
   padStart(maxLength: number, fillString?: string): string;
   repeat(count: number): string;
+  replace(searchValue: string, replaceValue: string): string;
   replaceAll(searchValue: string, replaceValue: string): string;
   slice(start?: number, end?: number): string;
   split(separator: string, limit?: number): string[];

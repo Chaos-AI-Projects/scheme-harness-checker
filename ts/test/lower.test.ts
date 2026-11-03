@@ -668,3 +668,10 @@ test("a field assignment is refused outside the pushable()-style alias rules", (
   unsupported("function f(): number { const o = { h: { g: (): number => 0 } }; o.h = { g: (): number => 1 }; return 0; } f();");
   unsupported("function f(x: unknown): number { const o: { v: unknown } = { v: 0 }; o.v = x; return 0; } f(1);");
 });
+
+test("String.prototype.replace lowers as a free method call (HC-34)", () => {
+  assert.equal(
+    lowered('const f = (s: string): string => s.replace("a", "b");'),
+    '(define js.f (lambda (js.s) (js.method.replace js.s "a" "b")))',
+  );
+});

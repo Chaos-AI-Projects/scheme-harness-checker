@@ -1104,3 +1104,24 @@ test("a field the body assigns cannot bound a loop or a recursion", () => {
     f(); spin(0);`, { toolDeclarations: TOOLS });
   assert.notDeepEqual(rec.violations, []);
 });
+
+// HC-34: replace is declared with string arguments only, like replaceAll.
+const STRING_REPLACE = `
+const raw = "temp: 21C, wind: 9kph";
+const tidy = raw.replace("C", " degrees").replace("kph", " km/h").replaceAll(", ", "; ");
+console.log(tidy);
+`;
+
+test("String.prototype.replace with string arguments is accepted", () => {
+  assertClean(STRING_REPLACE);
+});
+
+// The subset gate bans regex literals. The lib declares string arguments only, so a non-string search
+// value is a type error: widening it to string | RegExp would admit any object, since RegExp is empty.
+// A function replacer would call user code from inside the lib.
+test("replace with a RegExp, an object or a function replacer stays refused", () => {
+  assertRejected(`const t = "aa".replace(/a/g, "b");`, "unsupported-syntax");
+  assertRejected(`const t = "aa".replace({ a: 1 }, "b");`, "type-error");
+  assertRejected(`const t = "aa".replace("a", (m: string) => m + m);`, "type-error");
+  assertRejected(`const t = "aa".replace("a", 1);`, "type-error");
+});

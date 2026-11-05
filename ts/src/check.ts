@@ -1,7 +1,7 @@
 // checkTypeScript(): the TypeScript front-end of the harness checker. It runs the subset gate,
 // then compiles the program in strict mode against data/ts-safe.d.ts as the only lib, so an
-// undeclared global or member is a compile error. A program that passes is lowered to the IR and the
-// termination port judges that.
+// undeclared global or member is a compile error. The program is lowered to the IR, and if no pass
+// found a violation the termination port judges that IR.
 
 import { readFileSync } from "node:fs";
 import ts from "typescript";
@@ -59,11 +59,39 @@ const NOT_WHITELISTED = new Set([2304, 2552, 2339, 2550, 2551, 2576, 2582, 2583,
 export function checkTypeScript(code: string, options: CheckOptions = {}): CheckResult {
   return withinStack(() => {
     const gated = gate(code, options);
-    if (gated.violations.length > 0) return result(gated.violations);
-    const lowered = lower(gated.program, gated.checker!, numericKeys(gated.program, gated.checker!));
-    if (lowered.violations.length > 0) return result(lowered.violations);
+    if (!gated.checker) return result(gated.violations);
+    const lowered = lowerAfter(gated, gated.checker);
+    const violations = distinct([...gated.violations, ...lowered.violations]);
+    if (violations.length > 0) return result(violations);
     return result(checkTermination(lowered.ir, null, { numbers: "double", calls: "js" }).map((v) => fromTermination(v, gated.program)));
   }, result);
+}
+
+// Every pass that can soundly run on the program reports, so one violation cannot hide another
+// (HC-39). Only a parse error or a lib conflict stops the check early, since nothing after them has a
+// program to read. Lowering runs even after the gate rejects, but a program the gate rejected can
+// break the lowering's own assumptions, so a throw there is dropped: the gate already said no.
+// The lowering still stops at its first unsupported node, so a call to an undeclared tool hides any
+// lowering violation after it in the same function until the call is fixed.
+// Termination runs only on a program every earlier pass accepts, because it judges the IR.
+function lowerAfter(gated: { program: ts.SourceFile; violations: Violation[] }, checker: ts.TypeChecker): Lowered {
+  if (gated.violations.length === 0) return lower(gated.program, checker, numericKeys(gated.program, checker));
+  try {
+    return lower(gated.program, checker, numericKeys(gated.program, checker));
+  } catch {
+    return { ir: [], violations: [] };
+  }
+}
+
+// Two passes can flag the same node, as when an undeclared name is also typed any; report it once.
+function distinct(violations: Violation[]): Violation[] {
+  const seen = new Set<string>();
+  return violations.filter((v) => {
+    const at = `${v.line}:${v.column}`;
+    if (seen.has(at)) return false;
+    seen.add(at);
+    return true;
+  });
 }
 
 // Each const lowers to one more nested let*, and the gate, the lowering and the termination walkers
@@ -115,8 +143,8 @@ function declarationOf(sf: ts.SourceFile, name: string): ts.Node | undefined {
 export function lowerTypeScript(code: string, options: CheckOptions = {}): Lowered {
   return withinStack(() => {
     const gated = gate(code, options);
-    if (gated.violations.length > 0) return { ir: [], violations: gated.violations };
-    return lower(gated.program, gated.checker!, numericKeys(gated.program, gated.checker!));
+    if (gated.violations.length > 0 || !gated.checker) return { ir: [], violations: gated.violations };
+    return lower(gated.program, gated.checker, numericKeys(gated.program, gated.checker));
   }, (violations) => ({ ir: [], violations }));
 }
 
@@ -134,7 +162,6 @@ function gate(code: string, options: CheckOptions): { program: ts.SourceFile; vi
     reserved: new Set([...LIB_NAMES.values, ...LIB_NAMES.types, ...toolNames.values, ...toolNames.types]),
     declaredMembers: new Set([...LIB_NAMES.members, ...toolNames.members]),
   });
-  if (subset.length > 0) return result(subset);
 
   const { tsProgram, internal } = compile(tools, program);
   if (internal.length > 0) {
@@ -145,20 +172,21 @@ function gate(code: string, options: CheckOptions): { program: ts.SourceFile; vi
       const text = alone.map((d) => ts.flattenDiagnosticMessageText(d.messageText, "\n")).join("; ");
       throw new Error(`harness-checker: lib or tool declarations do not compile: ${text}`);
     }
-    return result(internal.map((d) => ({
+    return result([...subset, ...internal.map((d) => ({
       kind: "type-error" as const,
       message: `the program conflicts with the lib or a tool: ${ts.flattenDiagnosticMessageText(d.messageText, "\n")}`,
       line: 1,
       column: 1,
-    })));
+    }))]);
   }
 
   const typeErrors = tsProgram.getSemanticDiagnostics(program).map((d) =>
     fromDiagnostic(d, classify(d.code)));
-  if (typeErrors.length > 0) return result(typeErrors);
-
   const checker = tsProgram.getTypeChecker();
-  return result(checkTyped(program, checker), checker);
+  // An error node has the error type, which carries the Any flag, so the typed rules would report
+  // every type error a second time.
+  if (typeErrors.length > 0) return result([...subset, ...typeErrors], checker);
+  return result(distinct([...subset, ...checkTyped(program, checker)]), checker);
 }
 
 function compile(tools: ts.SourceFile, program: ts.SourceFile) {

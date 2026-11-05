@@ -1212,3 +1212,47 @@ test("replace with a RegExp, an object or a function replacer stays refused", ()
   assertRejected(`const t = "aa".replace("a", (m: string) => m + m);`, "type-error");
   assertRejected(`const t = "aa".replace("a", 1);`, "type-error");
 });
+
+// HC-39: every pass that can run on the program reports, so one violation cannot hide another.
+function messages(code: string): string[] {
+  return checkTypeScript(code, { toolDeclarations: TOOLS }).violations.map((v) => `${v.kind}: ${v.message}`);
+}
+const LOOP = "unsupported-syntax: a while body must end in an update of the variable it tests";
+
+test("a subset violation does not hide type errors or lowering violations", () => {
+  assert.deepEqual(messages("const g = globalThis; const w = window; while (true) { break }"), [
+    "not-whitelisted: globalThis is not whitelisted",
+    "not-whitelisted: Cannot find name 'window'.",
+    LOOP,
+  ]);
+});
+
+test("a type error does not hide a lowering violation", () => {
+  assert.deepEqual(messages("const w = window; while (true) { break }"), [
+    "not-whitelisted: Cannot find name 'window'.",
+    LOOP,
+  ]);
+});
+
+test("a lowering violation on its own is still reported", () => {
+  assert.deepEqual(messages("while (true) { break }"), [LOOP]);
+});
+
+test("every undeclared global in one function is reported, not only the first pass's", () => {
+  const found = messages(`
+    async function main(): Promise<void> {
+      const g = globalThis;
+      const w = window;
+      process.exit(1);
+      const r = await fetch("x");
+      console.log(g, w, r);
+      while (true) { break }
+    }`);
+  for (const name of ["globalThis", "'window'", "'process'", "'fetch'"]) {
+    assert.ok(found.some((m) => m.includes(name)), `${name} missing from ${JSON.stringify(found)}`);
+  }
+  assert.ok(!found.some((m) => m.includes("console")), "console is declared in ts-safe.d.ts");
+  // The lowering stops at the undeclared process.exit call, which the type check already reported at
+  // the same place, so the loop after it is not reached.
+  assert.equal(found.filter((m) => m.includes("process")).length, 1);
+});

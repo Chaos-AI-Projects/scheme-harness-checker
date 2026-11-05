@@ -71,8 +71,7 @@ export function checkTypeScript(code: string, options: CheckOptions = {}): Check
 // (HC-39). Only a parse error or a lib conflict stops the check early, since nothing after them has a
 // program to read. Lowering runs even after the gate rejects, but a program the gate rejected can
 // break the lowering's own assumptions, so a throw there is dropped: the gate already said no.
-// The lowering still stops at its first unsupported node, so a call to an undeclared tool hides any
-// lowering violation after it in the same function until the call is fixed.
+// The lowering recovers at each statement (HC-40), so an undeclared call hides no loop after it.
 // Termination runs only on a program every earlier pass accepts, because it judges the IR.
 function lowerAfter(gated: { program: ts.SourceFile; violations: Violation[] }, checker: ts.TypeChecker): Lowered {
   if (gated.violations.length === 0) return lower(gated.program, checker, numericKeys(gated.program, checker));

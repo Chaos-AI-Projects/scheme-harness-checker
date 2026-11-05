@@ -114,6 +114,9 @@ class Unsupported extends Error {
     this.node = node;
   }
 }
+// Past MAX_NODES every further form would throw again, so this one ends the lowering instead of
+// being recovered from at a statement.
+class TooLarge extends Unsupported {}
 
 export interface Lowered {
   ir: Datum[];
@@ -126,7 +129,7 @@ export interface Lowered {
 export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction: (e: ts.Expression) => boolean): Lowered {
   let nodes = 0;
   const count = <T extends Datum>(d: T): T => {
-    if (++nodes > MAX_NODES) throw new Unsupported(sf, `lowering grew past ${MAX_NODES} forms; split the early returns into functions`);
+    if (++nodes > MAX_NODES) throw new TooLarge(sf, `lowering grew past ${MAX_NODES} forms; split the early returns into functions`);
     return d;
   };
   const fresh = new Map<ts.Symbol, Sym>();
@@ -984,9 +987,32 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     return count([sym("for-each"), [S.lambda, [t], withBindings(bindings, loopBody(s.statement))], expr(s.expression)]);
   };
 
+  // HC-40: a statement that does not lower is recorded and the block goes on without it, so its
+  // first unsupported node cannot hide a later one. A statement is lowered again in each branch it
+  // is copied into, so a violation is recorded once per node and message. Any IR built past one is
+  // discarded, since no IR is returned beside a violation.
+  const unsupported = new Map<string, Violation>();
+  const record = (err: unknown): void => {
+    if (!(err instanceof Unsupported) || err instanceof TooLarge) throw err;
+    const { line, character } = sf.getLineAndCharacterOfPosition(err.node.getStart(sf));
+    const v: Violation = { kind: "unsupported-syntax", message: err.message, line: line + 1, column: character + 1 };
+    const key = `${err.node.getStart(sf)}:${err.message}`;
+    if (!unsupported.has(key)) unsupported.set(key, v);
+  };
+
   // stmts[i..] as one expression; falling off the end is (void). Inside a loop body a return has no
   // lowering, because the loop would have to stop.
   const block = (stmts: readonly ts.Statement[], i: number, inLoop = false): Datum => {
+    try {
+      return statement(stmts, i, inLoop);
+    } catch (err) {
+      record(err);
+      return block(stmts, i + 1, inLoop);
+    }
+  };
+  // Every statement after stmts[i] is lowered through block, so an Unsupported reaching block's catch
+  // came from stmts[i] itself.
+  const statement = (stmts: readonly ts.Statement[], i: number, inLoop: boolean): Datum => {
     if (i >= stmts.length) return count([S.void]);
     const s = stmts[i];
     if (ts.isReturnStatement(s)) {
@@ -1075,11 +1101,19 @@ export function lower(sf: ts.SourceFile, checker: ts.TypeChecker, byConstruction
     return [block([s], 0)];
   };
 
+  const ir: Datum[] = [];
   try {
-    return { ir: sf.statements.flatMap(top), violations: [] };
+    for (const s of sf.statements) {
+      try {
+        ir.push(...top(s));
+      } catch (err) {
+        record(err);
+      }
+    }
   } catch (err) {
-    if (!(err instanceof Unsupported)) throw err;
+    if (!(err instanceof TooLarge)) throw err;
     const { line, character } = sf.getLineAndCharacterOfPosition(err.node.getStart(sf));
-    return { ir: [], violations: [{ kind: "unsupported-syntax", message: err.message, line: line + 1, column: character + 1 }] };
+    return { ir: [], violations: [...unsupported.values(), { kind: "unsupported-syntax", message: err.message, line: line + 1, column: character + 1 }] };
   }
+  return unsupported.size > 0 ? { ir: [], violations: [...unsupported.values()] } : { ir, violations: [] };
 }

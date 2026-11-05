@@ -1252,7 +1252,52 @@ test("every undeclared global in one function is reported, not only the first pa
     assert.ok(found.some((m) => m.includes(name)), `${name} missing from ${JSON.stringify(found)}`);
   }
   assert.ok(!found.some((m) => m.includes("console")), "console is declared in ts-safe.d.ts");
-  // The lowering stops at the undeclared process.exit call, which the type check already reported at
-  // the same place, so the loop after it is not reached.
+  // The lowering refuses the undeclared process.exit call too, at the place the type check already
+  // reported, so it is reported once. HC-40: the loop after it is still reached.
   assert.equal(found.filter((m) => m.includes("process")).length, 1);
+  assert.ok(found.includes(LOOP), `loop missing from ${JSON.stringify(found)}`);
+});
+
+// HC-40: the lowering recovers at each statement, so its first unsupported node cannot hide a later one.
+function lowerings(code: string): string[] {
+  return messages(code).filter((m) => m.startsWith("unsupported-syntax"));
+}
+
+test("an unsupported node in one function does not hide a loop violation in the next", () => {
+  const found = messages("function a(): void { process.exit(1); } function b(): void { while (true) { break } }");
+  assert.equal(found.length, 2, JSON.stringify(found));
+  assert.ok(found[0].startsWith("not-whitelisted: Cannot find name 'process'"), found[0]);
+  assert.equal(found[1], LOOP);
+});
+
+test("every lowering violation is reported, in the same function and in different ones", () => {
+  assert.deepEqual(lowerings("function a(): void { while (true) { break } while (true) { break } }"), [LOOP, LOOP]);
+  assert.deepEqual(lowerings("function a(): void { while (true) { break } }\nfunction b(): void { while (true) { break } }"), [LOOP, LOOP]);
+  assert.deepEqual(lowerings("while (true) { break }\nwhile (true) { break }"), [LOOP, LOOP]);
+});
+
+test("a lowering violation in a nested function body does not hide one after the function", () => {
+  assert.deepEqual(lowerings(`
+    function a(): void {
+      const f = (): void => { while (true) { break } };
+      f();
+      while (true) { break }
+    }`), [LOOP, LOOP]);
+});
+
+test("a statement copied into both branches of an if reports its violation once", () => {
+  assert.deepEqual(lowerings(`
+    function a(n: number): void {
+      if (n > 0) { n = 1; }
+      while (true) { break }
+    }`), [LOOP]);
+});
+
+test("a program that grows past the node cap reports the cap once", () => {
+  // Each if that falls through lowers the rest of the block once per branch, so 20 of them double the
+  // rest 20 times, past MAX_NODES.
+  const ifs = Array.from({ length: 20 }, (_, k) => `if (n === ${k}) { n = n + 1; }`).join("\n");
+  const found = lowerings(`function a(n: number): number {\n${ifs}\nreturn n; }\nfunction b(n: number): number {\n${ifs}\nreturn n; }`);
+  assert.equal(found.length, 1, JSON.stringify(found));
+  assert.ok(found[0].includes("grew past"), found[0]);
 });

@@ -104,6 +104,29 @@ test("assigning a variable that changes what runs is rejected", () => {
   assertClean("read -r line < ./f");
 });
 
+test("assigning a variable a child program reads as code or options is rejected", () => {
+  assertRejected("TAR_OPTIONS=--to-command=id tar -xf ./a.tar", "TAR_OPTIONS");
+  assertRejected("export NODE_OPTIONS='--require ./x.js'", "NODE_OPTIONS");
+  assertRejected("export JAVA_TOOL_OPTIONS=x", "JAVA_TOOL_OPTIONS");
+  assertRejected("read -r MAVEN_OPTS < ./f", "MAVEN_OPTS");
+  assertRejected("PERL5OPT=-Mx cat ./f", "PERL5OPT");
+  assertRejected("declare -x PYTHONPATH=./lib", "PYTHONPATH");
+  assertRejected("RUBYOPT=x cat ./f", "RUBYOPT");
+  assertRejected("LUA_INIT=x cat ./f", "LUA_INIT");
+  assertRejected("export LESSOPEN='|id %s'", "LESSOPEN");
+  assertRejected("GIT_SSH_COMMAND=id cat ./f", "GIT_SSH_COMMAND");
+  assertRejected("export GIT_CONFIG_COUNT=1", "GIT_CONFIG_COUNT");
+  for (const name of ["GCONV_PATH", "LOCPATH", "GLIBC_TUNABLES", "PAGER", "MANPAGER", "EDITOR", "VISUAL", "SHELL"]) {
+    assertRejected(`${name}=./x cat ./f`, name);
+  }
+  assertClean('LESSONS=3; NODES=2; OPTIONS_FILE=./o; echo "$LESSONS $NODES $OPTIONS_FILE"');
+});
+
+test("POSIXLY_CORRECT is protected, since it changes how getopt reads a command's arguments", () => {
+  assertRejected("POSIXLY_CORRECT=1 sed -e p ./x", "POSIXLY_CORRECT");
+  assertRejected("export POSIXLY_CORRECT=1", "POSIXLY_CORRECT");
+});
+
 test("a nameref is rejected because it hides which variable is assigned", () => {
   assertRejected("local -n r=PATH", "nameref");
   assertRejected("declare -n r=x", "nameref");

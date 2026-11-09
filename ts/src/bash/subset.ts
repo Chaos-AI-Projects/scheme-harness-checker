@@ -49,6 +49,12 @@ const INTERPRETERS = new Map<string, CodeFlags>([
 ]);
 const PYTHON = /^(python[0-9.]*|pypy[0-9.]*)$/;
 
+// Whether the command is a shell or interpreter. One that reads its code from stdin or a file runs
+// text the checker never parsed, so the allowlist may never hold one.
+export function isInterpreter(name: string): boolean {
+  return codeFlags(name) !== undefined;
+}
+
 function codeFlags(name: string): CodeFlags | undefined {
   return PYTHON.test(name) ? { short: "c", long: [] } : INTERPRETERS.get(name);
 }
@@ -57,8 +63,22 @@ function codeFlags(name: string): CodeFlags | undefined {
 // runs on its own: PS4 is expanded, command substitutions included, under `set -x`. BASH_COMPAT 42
 // and below makes the quotes in "${x/a/'$(cmd)'}" literal, so the substitution inside them runs.
 // Every name starting with BASH is bash's own, and BASHPID+= evaluates its value as arithmetic.
-const PROTECTED = new Set(["PATH", "IFS", "ENV", "PS4", "PROMPT_COMMAND", "SHELLOPTS", "EXECIGNORE"]);
-const isProtected = (name: string) => PROTECTED.has(name) || name.startsWith("LD_") || name.startsWith("BASH");
+// POSIXLY_CORRECT makes getopt stop at the first operand, so sed 'e id' -e p reads 'e id' as its
+// script, and it puts bash itself in posix mode.
+const PROTECTED = new Set([
+  "PATH", "IFS", "ENV", "PS4", "PROMPT_COMMAND", "SHELLOPTS", "EXECIGNORE", "POSIXLY_CORRECT",
+]);
+// Variables a child program reads as code, a library path, or options that can run a command:
+// TAR_OPTIONS=--to-command=id makes tar run id, and GIT_SSH_COMMAND, LESSOPEN and PAGER name a
+// program to run. A plain assignment counts too, since the variable may already be exported.
+const CHILD_CODE = new Set([
+  "GCONV_PATH", "LOCPATH", "GLIBC_TUNABLES", "PAGER", "MANPAGER", "EDITOR", "VISUAL", "SHELL",
+  "LESS", "LESSOPEN", "LESSCLOSE", "LESSEDIT", "LESSKEY", "LESSKEYIN", "PHPRC", "TCLLIBPATH",
+]);
+const CHILD_CODE_PREFIX = /^(NODE_|PERL|PYTHON|RUBY|LUA_|GIT_)|_(OPTIONS|OPTS)$/;
+const isProtected = (name: string) =>
+  PROTECTED.has(name) || name.startsWith("LD_") || name.startsWith("BASH")
+  || CHILD_CODE.has(name) || CHILD_CODE_PREFIX.test(name);
 
 // bash gives these the integer attribute, so it evaluates any value assigned to them as arithmetic,
 // and a subscript in that value runs its command substitutions. SECONDS gets the attribute when the
@@ -716,7 +736,7 @@ function startsOperand(word: Word): boolean {
 
 // Whether the word may expand to several words: an unquoted glob, brace or extglob, or "$@",
 // "${a[@]}", "${!a[@]}" or "${!pre@}" anywhere in it, outside a command substitution.
-function manyWords(word: Word): boolean {
+export function manyWords(word: Word): boolean {
   const many = (node: unknown): boolean => {
     if (!node || typeof node !== "object") return false;
     const p = node as WordPart;
@@ -756,7 +776,7 @@ function plainParam(p: ParamExp): boolean {
 
 // The word's value after quote removal, or null when it holds an expansion, a glob, a brace
 // expansion, a tilde, or $'...' / $"..." quoting, any of which bash resolves only at run time.
-function literal(word: Word | null): string | null {
+export function literal(word: Word | null): string | null {
   if (!word) return null;
   let value = "";
   for (const [i, part] of word.parts.entries()) {

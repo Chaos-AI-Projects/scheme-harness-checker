@@ -1,0 +1,150 @@
+{
+  "commands": {
+    ":": {},
+    "[": {},
+    "base64": {},
+    "basename": {},
+    "break": {},
+    "cat": {},
+    "cd": {},
+    "chmod": {},
+    "comm": {},
+    "continue": {},
+    "cp": {},
+    "cut": {},
+    "date": {
+      "denyShort": "s",
+      "denyLong": [
+        "--set"
+      ],
+      "argShort": "dfrs",
+      "argLong": [
+        "--date",
+        "--file",
+        "--reference",
+        "--rfc-3339",
+        "--set"
+      ],
+      "operandPrefix": "+"
+    },
+    "df": {},
+    "diff": {
+      "denyShort": "l",
+      "denyLong": [
+        "--paginate"
+      ]
+    },
+    "dirname": {},
+    "du": {},
+    "echo": {},
+    "egrep": {},
+    "exit": {},
+    "false": {},
+    "fgrep": {},
+    "find": {
+      "rules": "find",
+      "denyWords": [
+        "-exec",
+        "-execdir",
+        "-ok",
+        "-okdir"
+      ]
+    },
+    "fold": {},
+    "getopts": {},
+    "grep": {},
+    "gzip": {},
+    "head": {},
+    "id": {},
+    "join": {},
+    "jq": {},
+    "ln": {},
+    "ls": {},
+    "mapfile": {},
+    "md5sum": {},
+    "mkdir": {},
+    "mktemp": {},
+    "mv": {},
+    "nl": {},
+    "od": {},
+    "paste": {},
+    "printf": {},
+    "pwd": {},
+    "read": {},
+    "readarray": {},
+    "readlink": {},
+    "realpath": {},
+    "return": {},
+    "rev": {},
+    "rm": {},
+    "rmdir": {},
+    "sed": {
+      "rules": "sed",
+      "denyShort": "f",
+      "denyLong": [
+        "--file"
+      ],
+      "argShort": "efl",
+      "argLong": [
+        "--expression",
+        "--file",
+        "--line-length"
+      ]
+    },
+    "seq": {},
+    "set": {},
+    "sha1sum": {},
+    "sha256sum": {},
+    "sha512sum": {},
+    "shift": {},
+    "sleep": {},
+    "sort": {
+      "denyLong": [
+        "--compress-program"
+      ],
+      "argShort": "kSotT",
+      "argLong": [
+        "--batch-size",
+        "--buffer-size",
+        "--compress-program",
+        "--field-separator",
+        "--files0-from",
+        "--key",
+        "--output",
+        "--parallel",
+        "--random-source",
+        "--sort",
+        "--temporary-directory"
+      ]
+    },
+    "stat": {},
+    "tac": {},
+    "tail": {
+      "denyShort": "fF",
+      "denyLong": [
+        "--follow",
+        "--retry"
+      ],
+      "argShort": "cns",
+      "argLong": [
+        "--bytes",
+        "--lines",
+        "--max-unchanged-stats",
+        "--pid",
+        "--sleep-interval"
+      ],
+      "plusOptions": true
+    },
+    "tee": {},
+    "test": {},
+    "touch": {},
+    "tr": {},
+    "true": {},
+    "umask": {},
+    "uname": {},
+    "uniq": {},
+    "unset": {},
+    "wc": {},
+    "whoami": {}
+  }
+}

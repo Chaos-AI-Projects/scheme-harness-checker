@@ -24,6 +24,7 @@
   "files": [
     "ts/dist",
     "data/ts-safe.d.ts",
+    "data/bash-safe.json",
     "README.md",
     "LICENSE"
   ],

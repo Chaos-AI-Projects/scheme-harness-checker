@@ -239,6 +239,18 @@
            (let ((form-desc (classify-form expr)))
              (dispatch form-desc env)))))
 
+      ;; Walk a cond or guard clause. A head of `else` and a `=>` in
+      ;; (test => receiver) are syntax, so only the expressions are walked.
+      (define (walk-cond-clause clause env)
+        (cond
+          ((eq? (car clause) 'else)
+           (for-each (lambda (e) (walk e env)) (cdr clause)))
+          ((and (= (length clause) 3) (eq? (cadr clause) '=>))
+           (walk (car clause) env)
+           (walk (caddr clause) env))
+          (else
+           (for-each (lambda (e) (walk e env)) clause))))
+
       ;; Dispatch on the classified form
       (define (dispatch form-desc env)
         (let ((tag (car form-desc)))
@@ -388,9 +400,7 @@
                (for-each
                 (lambda (clause)
                   (when (pair? clause)
-                    (if (eq? (car clause) 'else)
-                        (for-each (lambda (e) (walk e new-env)) (cdr clause))
-                        (for-each (lambda (e) (walk e new-env)) clause))))
+                    (walk-cond-clause clause new-env)))
                 clauses)
                (for-each (lambda (e) (walk e env)) body-exprs)))
 
@@ -424,7 +434,7 @@
              (for-each
               (lambda (clause)
                 (when (pair? clause)
-                  (for-each (lambda (e) (walk e env)) clause)))
+                  (walk-cond-clause clause env)))
               (cadr form-desc)))
 
             ((forbidden)

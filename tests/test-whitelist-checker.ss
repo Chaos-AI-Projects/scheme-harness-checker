@@ -277,6 +277,45 @@
   (assert-violations-empty "parameterize with whitelisted functions" violations))
 
 ;; --- Test: guard ---
+;; --- Test: cond ---
+(display "Test group: cond") (newline)
+
+;; HC-57: else and => are cond syntax, not identifiers to look up
+(let ((violations (check-source
+                   "(define (f x) (cond ((= x 1) 1) (else 2)))"
+                   '(=))))
+  (assert-violations-empty "cond else is not an identifier" violations))
+
+(let ((violations (check-source
+                   "(define (f x) (cond ((= x 1) 1) (else (g x))))"
+                   '(=))))
+  (assert-violations "cond else body is still walked" '(g) violations))
+
+(let ((violations (check-source
+                   "(define (f x al) (cond ((assv x al) => cdr) (else 0)))"
+                   '(assv cdr))))
+  (assert-violations-empty "cond => is not an identifier" violations))
+
+(let ((violations (check-source
+                   "(define (f x) (cond ((h x) => k)))"
+                   '())))
+  (assert-violations "cond => test and receiver are still walked" '(h k) violations))
+
+(let ((violations (check-source
+                   "(define (f x) (cond ((p x) (g x) (h x))))"
+                   '(p))))
+  (assert-violations "cond three-expression clause walks every expression" '(g h) violations))
+
+(let ((violations (check-source
+                   "(define (f x) (cond (x 1 => 2)))"
+                   '())))
+  (assert-violations "cond => outside the second position is flagged" '(=>) violations))
+
+(let ((violations (check-source
+                   "(define (f x) (cond ((g x) else)))"
+                   '())))
+  (assert-violations "cond else outside the head is flagged" '(else g) violations))
+
 (display "Test group: guard") (newline)
 
 (let ((violations (check-source
@@ -293,6 +332,11 @@
                    "(guard (e ((pair? e) (car e))) (error \"fail\"))"
                    '(pair? car error))))
   (assert-violations-empty "guard simple" violations))
+
+(let ((violations (check-source
+                   "(guard (e ((assq 'a e) => cdr)) (raise 1))"
+                   '(assq cdr raise))))
+  (assert-violations-empty "guard => is not an identifier" violations))
 
 ;; --- Test: internal define mutual visibility ---
 (display "Test group: internal define mutual visibility") (newline)

@@ -338,6 +338,93 @@
                    '(assq cdr raise))))
   (assert-violations-empty "guard => is not an identifier" violations))
 
+;; --- Test: a binding named after a keyword ---
+(display "Test group: shadowed keyword") (newline)
+
+;; HC-58: binding a keyword is rejected, because the walker would read a
+;; call through that binding as the keyword and skip or misread its operands
+(let ((violations (check-source
+                   "(define (f quote) (quote system)) (f (lambda (p) (p \"true\")))"
+                   '())))
+  (assert-violations "shadowed quote is rejected" '(quote) violations))
+
+(let ((violations (check-source "(define (f quote) 'system)" '())))
+  (assert-violations "shadowed quote via reader abbreviation" '(quote) violations))
+
+(let ((violations (check-source "(define (f cond) (cond system))" '())))
+  (assert-violations "shadowed cond is rejected" '(cond) violations))
+
+(let ((violations (check-source "(define (f case) (case 1 system))" '(case))))
+  (assert-violations "shadowed case is rejected though case is whitelisted" '(case) violations)
+  (assert-equal "shadowed keyword context" '(shadows-keyword)
+                (map wl-violation-context violations)))
+
+(let ((violations (check-source "(begin (define quote (lambda (x) x))) ((quote system) \"x\")" '())))
+  (assert-violations "quote defined inside begin is rejected" '(quote) violations))
+
+(let ((violations (check-source "(define (f) (begin (define cond (lambda a a))) (cond system))" '())))
+  (assert-violations "cond defined inside an internal begin is rejected" '(cond) violations))
+
+(let ((violations (check-source "(define (f x) (quote system))" '())))
+  (assert-violations-empty "unshadowed quote is still skipped" violations))
+
+;; One test per binder the walker knows
+(let ((violations (check-source "(define (quote) 1)" '())))
+  (assert-violations "define-fn name" '(quote) violations))
+
+(let ((violations (check-source "(define (f =>) 1)" '())))
+  (assert-violations "define-fn parameter" '(=>) violations))
+
+(let ((violations (check-source "(define else 1)" '())))
+  (assert-violations "define-var with a value" '(else) violations))
+
+(let ((violations (check-source "(define quote)" '())))
+  (assert-violations "define-var without a value" '(quote) violations))
+
+(let ((violations (check-source "(lambda (quote) 1)" '())))
+  (assert-violations "lambda parameter" '(quote) violations))
+
+(let ((violations (check-source "(let quote ((x 1)) x)" '())))
+  (assert-violations "named let name" '(quote) violations))
+
+(let ((violations (check-source "(let ((lambda 1)) 1)" '())))
+  (assert-violations "let variable" '(lambda) violations))
+
+(let ((violations (check-source "(letrec ((quote 1)) 1)" '())))
+  (assert-violations "letrec variable" '(quote) violations))
+
+(let ((violations (check-source "(let* ((quote 1)) 1)" '())))
+  (assert-violations "let* variable" '(quote) violations))
+
+(let ((violations (check-source "(case-lambda ((quote) 1))" '())))
+  (assert-violations "case-lambda parameter" '(quote) violations))
+
+(let ((violations (check-source "(do ((quote 1)) (#t 1))" '())))
+  (assert-violations "do variable" '(quote) violations))
+
+(let ((violations (check-source "(let-values (((quote) (values 1))) 1)" '(values))))
+  (assert-violations "let-values variable" '(quote) violations))
+
+(let ((violations (check-source "(guard (quote (#t 1)) 1)" '())))
+  (assert-violations "guard variable" '(quote) violations))
+
+(let ((violations (check-source "(define (f) (define (g) 1) (g))" '())))
+  (assert-violations-empty "ordinary names are not keywords" violations))
+
+;; Every keyword the walker gives meaning to is rejected as a binding
+(for-each
+ (lambda (kw)
+   (let ((violations (check-expressions (list (list 'lambda (list kw) 1)) '())))
+     (assert-violations (string-append "binding " (symbol->string kw) " is rejected")
+                        (list kw) violations)))
+ '(define lambda let letrec letrec* let* case-lambda do let-values
+   case guard parameterize set! quote begin if cond when unless and
+   or define-syntax syntax-case syntax-rules else =>))
+
+(assert-equal "collect-unbound still returns the unbound identifiers"
+              '(g)
+              (collect-unbound (read-all-expressions "(define (f quote) (g quote))")))
+
 ;; --- Test: internal define mutual visibility ---
 (display "Test group: internal define mutual visibility") (newline)
 

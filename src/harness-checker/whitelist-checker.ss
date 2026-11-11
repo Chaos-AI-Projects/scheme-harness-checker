@@ -86,14 +86,17 @@
 
   ;; Check a list of expressions against a whitelist (list of allowed symbols).
   ;; Returns a list of violation records.
+  ;; A keyword the program binds is a violation whatever the whitelist says.
   (define (check-expressions exprs whitelist)
-    (let ((unbound (collect-unbound exprs)))
-      (filter (lambda (v) v)
-              (map (lambda (id)
-                     (if (memq id whitelist)
-                         #f
-                         (make-wl-violation id 'unbound)))
-                   unbound))))
+    (let-values (((unbound shadowed) (peg-collect exprs)))
+      (append
+       (map (lambda (id) (make-wl-violation id 'shadows-keyword)) shadowed)
+       (filter (lambda (v) v)
+               (map (lambda (id)
+                      (if (memq id whitelist)
+                          #f
+                          (make-wl-violation id 'unbound)))
+                    unbound)))))
 
   ;; Check source code string against a whitelist.
   (define (check-source source whitelist)

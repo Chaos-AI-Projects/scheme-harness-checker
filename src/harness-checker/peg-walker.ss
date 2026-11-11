@@ -12,7 +12,7 @@
 ;;   Pass 3+4: Set operations (pure Scheme, no PEG)
 
 (library (harness-checker peg-walker)
-  (export peg-collect-unbound)
+  (export peg-collect peg-collect-unbound)
   (import (rnrs)
           (packrat-ext packrat))
 
@@ -219,14 +219,36 @@
   ;; Fused walker: threads environment, collects unbound identifiers
   ;; ---------------------------------------------------------------
 
-  ;; Main entry point: collect all unbound identifiers from expressions.
-  ;; Returns a deduplicated list of unbound symbols.
+  ;; Heads the grammar gives meaning to, plus the clause syntax else
+  ;; and =>. A program that binds one of these is rejected: the walker
+  ;; would read a call through that binding as the keyword (HC-58).
+  (define keywords
+    '(define lambda let letrec letrec* let* case-lambda do let-values
+      case guard parameterize set! quote begin if cond when unless and
+      or define-syntax syntax-case syntax-rules else =>))
+
+  ;; Unbound identifiers only.
   (define (peg-collect-unbound exprs)
-    (let ((unbound '()))
+    (let-values (((unbound shadowed) (peg-collect exprs)))
+      unbound))
+
+  ;; Main entry point. Returns two deduplicated lists: the unbound
+  ;; identifiers, and the keywords the program binds.
+  (define (peg-collect exprs)
+    (let ((unbound '())
+          (shadowed '()))
 
       ;; Record an unbound reference
       (define (record-unbound! sym)
         (set! unbound (cons sym unbound)))
+
+      ;; Extend env with names, recording any that is a keyword
+      (define (bind names env)
+        (for-each (lambda (n)
+                    (when (memq n keywords)
+                      (set! shadowed (cons n shadowed))))
+                  names)
+        (append names env))
 
       ;; Walk a single expression with the given environment
       (define (walk expr env)
@@ -261,20 +283,21 @@
                     (name (car sig))
                     (params (cdr sig))
                     (param-syms (extract-params params))
-                    (new-env (cons name (append param-syms env))))
+                    (new-env (bind (cons name param-syms) env)))
                (walk-body body-exprs new-env)))
 
             ((define-var)
              (let ((name (cadr form-desc))
                    (val (caddr form-desc)))
-               (when val
-                 (walk val (cons name env)))))
+               (let ((new-env (bind (list name) env)))
+                 (when val
+                   (walk val new-env)))))
 
             ((lambda-form)
              (let* ((formals (cadr form-desc))
                     (body-exprs (caddr form-desc))
                     (param-syms (extract-params formals))
-                    (new-env (append param-syms env)))
+                    (new-env (bind param-syms env)))
                (walk-body body-exprs new-env)))
 
             ((named-let)
@@ -283,7 +306,7 @@
                     (body-exprs (cadddr form-desc))
                     (vars (if (or (null? bindings) (not (pair? bindings))) '() (map car bindings)))
                     (vals (if (or (null? bindings) (not (pair? bindings))) '() (map cadr bindings)))
-                    (new-env (cons name (append vars env))))
+                    (new-env (bind (cons name vars) env)))
                (for-each (lambda (v) (walk v env)) vals)
                (walk-body body-exprs new-env)))
 
@@ -296,7 +319,7 @@
                  (else
                   (let* ((vars (map car bindings))
                          (vals (map cadr bindings))
-                         (new-env (append vars env)))
+                         (new-env (bind vars env)))
                     (for-each (lambda (v) (walk v env)) vals)
                     (walk-body body-exprs new-env))))))
 
@@ -307,7 +330,7 @@
                    (walk-body body-exprs env)
                    (let* ((vars (map car bindings))
                           (vals (map cadr bindings))
-                          (new-env (append vars env)))
+                          (new-env (bind vars env)))
                      (for-each (lambda (v) (walk v new-env)) vals)
                      (walk-body body-exprs new-env)))))
 
@@ -323,7 +346,7 @@
                            (when (and (pair? binding) (pair? (cdr binding)))
                              (walk (cadr binding) current-env))
                            (let ((var (if (pair? binding) (car binding) binding)))
-                             (loop (cdr remaining) (cons var current-env)))))))))
+                             (loop (cdr remaining) (bind (list var) current-env)))))))))
 
             ((case-lambda-form)
              (let ((clauses (cadr form-desc)))
@@ -336,7 +359,7 @@
                     (let* ((params (car clause))
                            (body (cdr clause))
                            (param-syms (extract-params params))
-                           (new-env (append param-syms env)))
+                           (new-env (bind param-syms env)))
                       (walk-body body new-env))))
                 clauses)))
 
@@ -345,7 +368,7 @@
                     (termination (caddr form-desc))
                     (body-exprs (cadddr form-desc))
                     (vars (if (or (null? bindings) (not (pair? bindings))) '() (map car bindings)))
-                    (new-env (append vars env)))
+                    (new-env (bind vars env)))
                ;; Walk init exprs in outer env
                (when (pair? bindings)
                  (for-each (lambda (binding)
@@ -375,7 +398,7 @@
                                                   (extract-params (car binding))
                                                   '()))
                                             bindings)))
-                          (new-env (append vars env)))
+                          (new-env (bind vars env)))
                      (for-each (lambda (binding)
                                  (when (and (pair? binding) (pair? (cdr binding)))
                                    (walk (cadr binding) env)))
@@ -396,7 +419,7 @@
                     (body-exprs (caddr form-desc))
                     (var (car guard-clause))
                     (clauses (cdr guard-clause))
-                    (new-env (cons var env)))
+                    (new-env (bind (list var) env)))
                (for-each
                 (lambda (clause)
                   (when (pair? clause)
@@ -481,8 +504,8 @@
       ;; Run the walker
       (walk-body exprs '())
 
-      ;; Return deduplicated unbound list
-      (deduplicate unbound)))
+      ;; Return the deduplicated lists
+      (values (deduplicate unbound) (deduplicate shadowed))))
 
   ;; Remove duplicates from a list of symbols
   (define (deduplicate syms)

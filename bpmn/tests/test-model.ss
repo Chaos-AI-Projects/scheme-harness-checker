@@ -364,6 +364,27 @@
                (model-of (string-append
                           "<bpmn:startEvent id=\"S\"/><bpmn:endEvent id=\"E\"/>"
                           "<bpmn:sequenceFlow id=\"f1\" sourceRef=\"S\" targetRef=\"E\"><x:documentation xmlns:x=\"urn:x\"/></bpmn:sequenceFlow>"))))
+(assert-equal "a default attribute marks only a flow out of its own node" '(#f #f)
+              (let ((m (model-of (string-append
+                                  "<bpmn:startEvent id=\"S\"/><bpmn:task id=\"T\"/><bpmn:task id=\"U\" default=\"f2\"/>"
+                                  "<bpmn:endEvent id=\"E\"/>"
+                                  (seq "S" "T" "f1") (seq "T" "E" "f2") (seq "T" "U" "f3") (seq "U" "E" "f4")))))
+                (list (bpmn-flow-default? (flow-by-id m "f2")) (bpmn-flow-default? (flow-by-id m "f4")))))
+(assert-equal "a sub-process's default attribute marks only a flow out of the sub-process" #f
+              (bpmn-flow-default?
+               (flow-by-id (model-of
+                            (string-append
+                             "<bpmn:startEvent id=\"S\"/>"
+                             "<bpmn:subProcess id=\"SP\" default=\"f1\"><bpmn:startEvent id=\"SS\"/><bpmn:endEvent id=\"SE\"/>"
+                             (seq "SS" "SE" "s1") "</bpmn:subProcess>"
+                             "<bpmn:endEvent id=\"E\"/>" (seq "S" "SP" "f1") (seq "SP" "E" "f2")))
+                           "f1")))
+(assert-equal "a flow out of a foreign element is not its default" #f
+              (bpmn-flow-default?
+               (flow-by-id (model-of (string-append
+                                      "<bpmn:endEvent id=\"E\"/>" (seq "K" "E" "f1")
+                                      "<x:k xmlns:x=\"urn:x\" id=\"K\" default=\"f1\"/>"))
+                           "f1")))
 (assert-equal "a default attribute on a foreign element marks no flow default" #f
               (bpmn-flow-default?
                (flow-by-id (model-of (string-append

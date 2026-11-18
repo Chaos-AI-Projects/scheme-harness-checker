@@ -256,18 +256,18 @@
                (else (report! (xml-attr c "id") name)))))
          (child-elements container)))
 
-      ;; A flow is the default when its source names it in a default attribute.
-      (define (default-flow? id)
-        (exists (lambda (n) (equal? (xml-attr (bpmn-node-xml n) "default") id)) nodes))
-
-      (define (sub-process-defaults)
+      ;; source id -> the flow its default attribute names, for every BPMN element
+      ;; with both, sub-processes included.
+      (define (default-attrs)
         (let loop ((e root) (acc '()))
           (fold-left (lambda (acc c)
-                       (loop c (if (and (bpmn-named? c "subProcess") (xml-attr c "default"))
-                                   (cons (xml-attr c "default") acc)
+                       (loop c (if (and (bpmn? c) (xml-attr c "id") (xml-attr c "default"))
+                                   (cons (cons (xml-attr c "id") (xml-attr c "default")) acc)
                                    acc)))
                      acc (child-elements e))))
 
+      ;; A flow is the default when its own source, before rewiring, names it in
+      ;; a default attribute.
       (define (make-flow e defaults)
         (let* ((id (xml-attr e "id"))
                (source (let ((r (assoc (xml-attr e "sourceRef") rewire)))
@@ -277,7 +277,8 @@
                (cond-elt (find (lambda (k) (bpmn-named? k "conditionExpression")) (child-elements e))))
           (make-bpmn-flow id source target
                           (and cond-elt (trim (xml-text cond-elt)))
-                          (or (default-flow? id) (and (member id defaults) #t)))))
+                          (let ((d (assoc (xml-attr e "sourceRef") defaults)))
+                            (and d (string=? (cdr d) id))))))
 
       (for-each
        (lambda (c)
@@ -297,7 +298,7 @@
        (child-elements root))
 
       (set! nodes (reverse nodes))
-      (let ((defaults (sub-process-defaults)))
+      (let ((defaults (default-attrs)))
         (make-bpmn-model process-id
                          nodes
                          (map (lambda (e) (make-flow e defaults)) (reverse flow-elts))
